@@ -42,7 +42,9 @@ python -m torch.distributed.launch $DISTRIBUTED_ARGS \
        --save-interval 10000 \
        --eval-interval 1000 \
        --eval-iters 10 \
-       --fp16
+       --fp16 \
+       --loss-scale 16384
+
 #       --min-loss-scale 0.1
 #       --optimizer sgd
 #       --fp16-lm-cross-entropy
