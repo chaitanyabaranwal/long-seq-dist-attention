@@ -100,17 +100,21 @@ def loss_func(loss_mask, sentence_order, output_tensor):
     lm_loss_, sop_logits = output_tensor
     lm_loss_ = lm_loss_.float()
     loss_mask = loss_mask.float()
-    # lm_loss = lm_loss_.float()
-    # lm_loss = lm_loss_.float() / loss_mask.sum()
-    # print(lm_loss)
-    lm_loss = torch.sum(
-        lm_loss_.view(-1) * loss_mask.reshape(-1)) / loss_mask.sum()
+    loss_mask_sum = loss_mask.sum()
 
-    lm_loss /= mpu.get_tensor_model_parallel_world_size()
+    torch.distributed.all_reduce(
+        loss_mask_sum,
+        group=mpu.get_tensor_model_parallel_group()
+    )
+
+    lm_loss = torch.sum(
+        lm_loss_.view(-1) * loss_mask.reshape(-1))
     torch.distributed.all_reduce(
         lm_loss,
         group=mpu.get_tensor_model_parallel_group()
     )
+
+    lm_loss /= loss_mask_sum
 
     if sop_logits is not None:
         sop_loss = F.cross_entropy(sop_logits.view(-1, 2).float(),
@@ -118,6 +122,7 @@ def loss_func(loss_mask, sentence_order, output_tensor):
                                    ignore_index=-1)
         sop_loss = sop_loss.float()
         loss = lm_loss + sop_loss
+
         averaged_losses = average_losses_across_data_parallel_group(
             [lm_loss, sop_loss])
         return loss, {'lm loss': averaged_losses[0],
