@@ -31,7 +31,7 @@ python -m torch.distributed.launch $DISTRIBUTED_ARGS \
        --data-impl mmap \
        --split 949,50,1 \
        --distributed-backend nccl \
-       --lr 0.0005 \
+       --lr 0.0001 \
        --lr-decay-style linear \
        --min-lr 1.0e-5 \
        --lr-decay-iters 990000 \
@@ -43,9 +43,6 @@ python -m torch.distributed.launch $DISTRIBUTED_ARGS \
        --eval-interval 1000 \
        --eval-iters 10 \
        --fp16
-#       --initial-loss-scale 65536 \
-
-
 #       --min-loss-scale 0.1
 #       --optimizer sgd
 #       --fp16-lm-cross-entropy

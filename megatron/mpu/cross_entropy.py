@@ -149,33 +149,36 @@ class _VocabCrossEntropy(torch.autograd.Function):
         # Loss = log(sum(exp(logits))) - predicted-logit.
         loss = torch.log(sum_exp_logits) - predicted_logits
 
-        # if torch.distributed.get_rank() == 4:
-        #     print(exp_logits, flush=True)
-
         # Store softmax, target-mask and masked-target for backward pass.
         exp_logits.div_(sum_exp_logits.unsqueeze(dim=-1))
         ctx.save_for_backward(exp_logits, target_mask, masked_target_1d)
 
         return loss
 
+    @staticmethod
+    def backward(ctx, grad_output):
+        # Retreive tensors from the forward path.
+        softmax, target_mask, masked_target_1d = ctx.saved_tensors
+
+        # All the inputs have softmax as thier gradient.
+        grad_input = softmax
+        # For simplicity, work with the 2D gradient.
+        partition_vocab_size = softmax.size()[-1]
+        grad_2d = grad_input.view(-1, partition_vocab_size)
+
+        # Add the gradient from matching classes.
+        arange_1d = torch.arange(start=0, end=grad_2d.size()[0],
+                                 device=grad_2d.device)
+        grad_2d[arange_1d, masked_target_1d] -= (
+                1.0 - target_mask.view(-1).float())
+
+        # Finally elementwise multiplication with the output gradients.
+        grad_input.mul_(grad_output.unsqueeze(dim=-1))
+
+        return grad_input, None
+
 
 def vocab_cross_entropy(vocab_logits, target):
     """helper function for the cross entropy."""
-    target_mask = target < 0
-    target_mask = target_mask.reshape(-1)
-    vocab_logits = vocab_logits.reshape(-1, vocab_logits.size(2))
-    target = target.reshape(-1)
 
-    target[target_mask] = 0
-    vocab_logits[target_mask] = 0
-    loss = torch.nn.functional.cross_entropy(vocab_logits, target)
-    loss /= get_tensor_model_parallel_world_size()
-    torch.distributed.all_reduce(
-        loss,
-        op=torch.distributed.ReduceOp.SUM,
-        group=get_tensor_model_parallel_group()
-    )
-
-    return loss
-
-    # return _vocabcrossentropy.apply(vocab_logits, target)
+    return _VocabCrossEntropy.apply(vocab_logits, target)

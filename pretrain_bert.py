@@ -98,13 +98,19 @@ def get_batch(data_iterator):
 
 def loss_func(loss_mask, sentence_order, output_tensor):
     lm_loss_, sop_logits = output_tensor
-    # lm_loss_ = lm_loss_.float()
-    # loss_mask = loss_mask.float()
-    lm_loss = lm_loss_.float()
+    lm_loss_ = lm_loss_.float()
+    loss_mask = loss_mask.float()
+    # lm_loss = lm_loss_.float()
     # lm_loss = lm_loss_.float() / loss_mask.sum()
     # print(lm_loss)
-    # lm_loss = TORCH.sum(
-    #     lm_loss_.view(-1) * loss_mask.reshape(-1)) / loss_mask.sum()
+    lm_loss = torch.sum(
+        lm_loss_.view(-1) * loss_mask.reshape(-1)) / loss_mask.sum()
+
+    lm_loss /= mpu.get_tensor_model_parallel_world_size()
+    torch.distributed.all_reduce(
+        lm_loss,
+        group=mpu.get_tensor_model_parallel_group()
+    )
 
     if sop_logits is not None:
         sop_loss = F.cross_entropy(sop_logits.view(-1, 2).float(),

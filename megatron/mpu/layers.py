@@ -53,14 +53,13 @@ def param_is_not_tensor_parallel_duplicate(param):
 
 
 def set_tensor_model_parallel_attributes(tensor, is_parallel, dim, stride):
-    pass
     # Make sure the attributes are not set.
-    # for attribute in _MODEL_PARALLEL_ATTRIBUTE_DEFAULTS:
-    #     assert not hasattr(tensor, attribute)
+    for attribute in _MODEL_PARALLEL_ATTRIBUTE_DEFAULTS:
+        assert not hasattr(tensor, attribute)
     # # Set the attributes.
-    # setattr(tensor, 'tensor_model_parallel', is_parallel)
-    # setattr(tensor, 'partition_dim', dim)
-    # setattr(tensor, 'partition_stride', stride)
+    setattr(tensor, 'tensor_model_parallel', is_parallel)
+    setattr(tensor, 'partition_dim', dim)
+    setattr(tensor, 'partition_stride', stride)
 
 
 def set_defaults_if_not_set_tensor_model_parallel_attributes(tensor):

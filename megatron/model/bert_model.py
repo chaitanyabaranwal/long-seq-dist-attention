@@ -31,6 +31,7 @@ from megatron.model.utils import scaled_init_method_normal
 from .module import MegatronModule
 from megatron.mpu.initialize import get_tensor_model_parallel_rank
 from megatron.mpu.initialize import get_tensor_model_parallel_world_size
+from megatron.mpu.initialize import get_tensor_model_parallel_group
 
 def bert_extended_attention_mask(attention_mask):
     args = get_args()
@@ -90,10 +91,8 @@ class BertLMHead(MegatronModule):
 
         args = get_args()
 
-        # self.bias = torch.nn.Parameter(torch.zeros(mpu_vocab_size))
-        #
-        # mpu.set_tensor_model_parallel_attributes(self.bias, True, 0, 1)
-        self.bias = None
+        self.bias = torch.nn.Parameter(torch.zeros(mpu_vocab_size))
+        mpu.set_tensor_model_parallel_attributes(self.bias, True, 0, 1)
 
         self.parallel_output = parallel_output
 
@@ -117,31 +116,8 @@ class BertLMHead(MegatronModule):
             output = F.linear(hidden_states, word_embeddings_weight)
         else:
             output = F.linear(hidden_states, word_embeddings_weight, self.bias)
-            # output = F.linear(hidden_states, word_embeddings_weight, self.bias)
 
-
-        # output = parallel_lm_logits(hidden_states,
-        #                             word_embeddings_weight,
-        #                             self.parallel_output,
-        #                             bias=self.bias)
         return output
-
-
-####################################
-# NOTE: for RingParallelAttention  #
-####################################
-
-class DummyGrad(torch.autograd.Function):
-
-    @staticmethod
-    def forward(ctx, input):
-        return input.clone()
-
-    @staticmethod
-    def backward(ctx, grad_outputs):
-        # print(grad_outputs, flush=True)
-        grad_ = torch.nan_to_num(grad_outputs.clone())
-        return grad_
 
 
 def post_language_model_processing(lm_output, pooled_output,
@@ -156,14 +132,11 @@ def post_language_model_processing(lm_output, pooled_output,
     binary_logits = None
     if binary_head is not None:
         binary_logits = binary_head(pooled_output)
-
-    ####################################
-    # NOTE: for RingParallelAttention  #
-    ####################################
-    # if torch.distributed.get_rank() == 4:
-    #     print(binary_head.weight, flush=True)
-    #     print(binary_head.bias, flush=True)
-    # lm_logits = DummyGrad.apply(lm_logits)
+        binary_logits /= get_tensor_model_parallel_world_size()
+        torch.distributed.all_reduce(
+            binary_logits,
+            group=get_tensor_model_parallel_group()
+        )
 
     if lm_labels is None:
         return lm_logits, binary_logits
