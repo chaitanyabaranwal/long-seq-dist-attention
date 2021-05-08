@@ -347,6 +347,7 @@ class Float16OptimizerWithFloat16Params(MegatronOptimizer):
             for model_param, main_param in zip(model_group, main_group):
                 model_data.append(model_param.data)
                 main_data.append(main_param.data)
+
         return model_data, main_data
 
 

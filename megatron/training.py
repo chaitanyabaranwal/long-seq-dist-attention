@@ -427,6 +427,7 @@ def train_step(forward_step_func, data_iterator,
         for key in losses_reduced[0]:
             losses_reduced_for_key = [x[key] for x in losses_reduced]
             loss_reduced[key] = sum(losses_reduced_for_key) / len(losses_reduced_for_key)
+
         return loss_reduced, skipped_iter, grad_norm, num_zeros_in_grad
     return {}, skipped_iter, grad_norm, num_zeros_in_grad
 
@@ -623,7 +624,6 @@ def train(forward_step_func, model, optimizer, lr_scheduler,
                        model,
                        optimizer,
                        lr_scheduler)
-
         iteration += 1
         # report_memory('(after {} iterations)'.format(iteration))
         args.consumed_train_samples += mpu.get_data_parallel_world_size() * \
@@ -686,7 +686,6 @@ def train(forward_step_func, model, optimizer, lr_scheduler,
             torch.distributed.barrier()
             print_datetime('exiting program at iteration {}'.format(iteration))
             sys.exit()
-
 
     return iteration
 

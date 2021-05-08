@@ -56,14 +56,15 @@ def clip_grad_norm_fp32(parameters, max_norm, norm_type=2):
     grads_for_norm = []
     for param in parameters:
         grad_not_none = param.grad is not None
-        is_not_shared = param_is_not_shared(param)
-        is_not_tp_duplicate = param_is_not_tensor_parallel_duplicate(param)
+        # is_not_shared = param_is_not_shared(param)
+        # is_not_tp_duplicate = param_is_not_tensor_parallel_duplicate(param)
         grad = param.grad.detach()
         if grad_not_none:
             # Make sure the grads are in fp32
             assert param.grad.type() == 'torch.cuda.FloatTensor'
             grads.append(grad)
-        if grad_not_none and is_not_shared and is_not_tp_duplicate:
+        # if grad_not_none and is_not_shared and is_not_tp_duplicate:
+        if grad_not_none:
             grads_for_norm.append(grad)
 
     # Norm parameters.
@@ -91,21 +92,21 @@ def clip_grad_norm_fp32(parameters, max_norm, norm_type=2):
                 amp_C.multi_tensor_l2norm,
                 dummy_overflow_buf,
                 [grads_for_norm],
-                False # no per-parameter norm
+                False  # no per-parameter norm
             )
             # Since we will be summing across data parallel groups,
             # we need the pow(norm-type).
             total_norm = grad_norm ** norm_type
-
         else:
             for grad in grads_for_norm:
                 grad_norm = torch.norm(grad, norm_type)
                 total_norm += grad_norm ** norm_type
 
-        # Sum across all model-parallel GPUs.
+        # Sum across all model-parallel GPUs
         torch.distributed.all_reduce(total_norm,
                                      op=torch.distributed.ReduceOp.SUM,
                                      group=mpu.get_model_parallel_group())
+
         total_norm = total_norm.item() ** (1.0 / norm_type)
 
     # Scale.

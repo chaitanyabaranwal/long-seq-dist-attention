@@ -169,6 +169,13 @@ def vocab_cross_entropy(vocab_logits, target):
     target[target_mask] = 0
     vocab_logits[target_mask] = 0
     loss = torch.nn.functional.cross_entropy(vocab_logits, target)
+    loss /= get_tensor_model_parallel_world_size()
+    torch.distributed.all_reduce(
+        loss,
+        op=torch.distributed.ReduceOp.SUM,
+        group=get_tensor_model_parallel_group()
+    )
+
     return loss
 
     # return _vocabcrossentropy.apply(vocab_logits, target)

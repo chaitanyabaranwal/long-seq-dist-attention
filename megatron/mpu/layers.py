@@ -246,8 +246,8 @@ class VocabEmbedding(torch.nn.Module):
             _initialize_affine_weight_gpu(self.weight, init_method,
                                           partition_dim=0, stride=1)
 
-    def forward(self, input_):
-        output = F.embedding(input_, self.weight,
+    def forward(self, hidden_state):
+        output = F.embedding(hidden_state, self.weight,
                               self.padding_idx, self.max_norm,
                               self.norm_type, self.scale_grad_by_freq,
                               self.sparse)
@@ -566,7 +566,7 @@ class RingQK(torch.autograd.Function):
         local_world_size = get_tensor_model_parallel_world_size()
         start_idx = local_rank * args.sub_seq_length
         end_idx = (local_rank + 1) * args.sub_seq_length
-        attention_score[:, :, start_idx: end_idx] += part_a
+        attention_score[:, :, start_idx: end_idx] = part_a
 
         # compute QK^T in ring-all-reduce style
         for i in range(local_world_size - 1):

@@ -62,6 +62,7 @@ def get_batch(data_iterator):
     # NCCL does not support scatter yet
     # data_b = mpu.scatter_data(keys, data, datatype)
     # unpack
+    # data_b = mpu.broadcast_data(keys, data, datatype)
     # tokens = data_b['text'].long()
     # types = data_b['types'].long()
     # sentence_order = data_b['is_random'].long()
@@ -69,14 +70,13 @@ def get_batch(data_iterator):
     # lm_labels = data_b['labels'].long()
     # padding_mask = data_b['padding_mask'].long()
 
-
     ####################################
     # NOTE: for RingParallelAttention  #
     ####################################
     # unpack
     data_b = mpu.broadcast_data(keys, data, datatype)
 
-    # get tensor parallel local rank
+    # # get tensor parallel local rank
     global_rank = torch.distributed.get_rank()
     local_world_size = mpu.get_tensor_model_parallel_world_size()
     local_rank = global_rank % local_world_size
@@ -84,19 +84,14 @@ def get_batch(data_iterator):
     sub_seq_length = seq_length // local_world_size
     sub_seq_start = local_rank * sub_seq_length
     sub_seq_end = (local_rank+1) * sub_seq_length
-
-    # Unpack.
-    tokens = data_b['text'].long()[:, sub_seq_start:sub_seq_end]
-    types = data_b['types'].long()[:, sub_seq_start:sub_seq_end]
+    #
+    # # Unpack.
+    tokens = data_b['text'][:, sub_seq_start:sub_seq_end].long().clone()
+    types = data_b['types'][:, sub_seq_start:sub_seq_end].long()
     sentence_order = data_b['is_random'].long()
-    loss_mask = data_b['loss_mask'].float()[:, sub_seq_start:sub_seq_end]
-    lm_labels = data_b['labels'].long()[:, sub_seq_start:sub_seq_end]
+    loss_mask = data_b['loss_mask'][:, sub_seq_start:sub_seq_end].float()
+    lm_labels = data_b['labels'][:, sub_seq_start:sub_seq_end].long()
     padding_mask = data_b['padding_mask'].long()
-
-    # padding_mask = data_b['padding_mask'].long()[:, sub_seq_start:sub_seq_end]
-
-    # if torch.distributed.get_rank() == 0:
-    #     print(f'loss mask on rank 0: {loss_mask}', flush=True)
 
     return tokens, types, sentence_order, loss_mask, lm_labels, padding_mask
 
@@ -104,9 +99,11 @@ def get_batch(data_iterator):
 def loss_func(loss_mask, sentence_order, output_tensor):
     lm_loss_, sop_logits = output_tensor
     # lm_loss_ = lm_loss_.float()
+    # loss_mask = loss_mask.float()
     lm_loss = lm_loss_.float()
-    loss_mask = loss_mask.float()
-    # lm_loss = torch.sum(
+    # lm_loss = lm_loss_.float() / loss_mask.sum()
+    # print(lm_loss)
+    # lm_loss = TORCH.sum(
     #     lm_loss_.view(-1) * loss_mask.reshape(-1)) / loss_mask.sum()
 
     if sop_logits is not None:
@@ -166,8 +163,6 @@ def train_valid_test_datasets_provider(train_val_test_num_samples):
         skip_warmup=(not args.mmap_warmup),
         binary_head=args.bert_binary_head)
     print_rank_0("> finished creating BERT datasets ...")
-
-    # chanage
 
     return train_ds, valid_ds, test_ds
 

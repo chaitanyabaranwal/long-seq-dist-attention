@@ -410,13 +410,13 @@ class RingParallelAttention(MegatronModule):
             coeff = self.layer_number
             self.norm_factor *= coeff
 
-        self.scale_mask_softmax = FusedScaleMaskSoftmax(
-            self.fp16, self.bf16,
-            self.attn_mask_type,
-            args.masked_softmax_fusion,
-            attention_mask_func,
-            self.attention_softmax_in_fp32,
-            coeff)
+        # self.scale_mask_softmax = fusedscalemasksoftmax(
+        #     self.fp16, self.bf16,
+        #     self.attn_mask_type,
+        #     args.masked_softmax_fusion,
+        #     attention_mask_func,
+        #     self.attention_softmax_in_fp32,
+        #     coeff)
 
         # Dropout. Note that for a single iteration, this layer will generate
         # different outputs on different number of parallel partitions but
@@ -538,8 +538,11 @@ class RingParallelAttention(MegatronModule):
 
         # attention scores and attention mask [b, sq, sk]
         attention_scores = attention_scores.unsqueeze(1)
-        attention_probs = self.scale_mask_softmax(attention_scores,
-                                                  attention_mask)
+        # attention_probs = self.scale_mask_softmax(attention_scores,
+        #                                           attention_mask)
+
+        attention_scores = attention_scores + attention_mask
+        attention_probs = F.softmax(attention_scores, dim=-1)
 
         # This is actually dropping out entire tokens to attend to, which might
         # seem a bit unusual, but is taken from the original Transformer paper.
@@ -752,13 +755,13 @@ class ParallelTransformerLayer(MegatronModule):
 
         # Layer norm at the beginning of the transformer layer.
         layernorm_output = self.input_layernorm(hidden_states)
+
         # Self attention.
         attention_output, attention_bias = \
             self.self_attention(layernorm_output,
                                 attention_mask,
                                 layer_past=layer_past,
                                 get_key_value=get_key_value)
-
         if get_key_value:
             attention_output, presents = attention_output
 
@@ -790,6 +793,7 @@ class ParallelTransformerLayer(MegatronModule):
 
         # Layer norm post the self attention.
         layernorm_output = self.post_attention_layernorm(layernorm_input)
+
 
         if self.layer_type == LayerType.decoder:
             attention_output, attention_bias = \

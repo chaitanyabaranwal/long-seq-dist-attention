@@ -72,21 +72,6 @@ def bert_position_ids(token_ids):
     return position_ids
 
 
-class TempGrad(torch.autograd.Function):
-
-    @staticmethod
-    def forward(ctx, hidden_states, word_embeddings_weight):
-        ctx.save_for_backward(hidden_states, word_embeddings_weight)
-        return F.linear(hidden_states, word_embeddings_weight)
-
-    @staticmethod
-    def backward(ctx, grad_out):
-        # print(grad_out.clone(), flush=True)
-        softmax, target_mask = ctx.saved_tensors
-
-        return torch.rand_like(softmax), torch.rand_like(target_mask)
-
-
 class BertLMHead(MegatronModule):
     """Masked LM head for Bert
 
