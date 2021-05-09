@@ -15,7 +15,9 @@
 
 """Pretrain BERT"""
 
+import sys
 import torch
+
 import torch.nn.functional as F
 from functools import partial
 from megatron import get_args
@@ -27,6 +29,7 @@ from megatron.model import BertModel
 from megatron.training import pretrain
 from megatron.utils import average_losses_across_data_parallel_group
 from megatron.p2p_communication import ring_forward
+
 
 
 def model_provider(pre_process=True, post_process=True):

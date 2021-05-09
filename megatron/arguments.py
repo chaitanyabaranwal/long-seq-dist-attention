@@ -429,6 +429,8 @@ def _add_training_args(parser):
     group.add_argument('--dataloader-type', type=str, default=None,
                        choices=['single', 'cyclic'],
                        help='Single pass vs multiple pass data loader')
+    group.add_argument('--exp', action='store_true',
+                       help='set to experiment mode to save tensorboard logs and training log to local file')
     return parser
 
 

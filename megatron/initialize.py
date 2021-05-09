@@ -17,7 +17,9 @@
 
 import random
 import os
+import sys
 import time
+
 
 import numpy as np
 import torch
@@ -88,7 +90,6 @@ def initialize_megatron(extra_args_provider=None, args_defaults={},
 
         # No continuation function
         return None
-
 
 def _compile_dependencies():
 

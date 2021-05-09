@@ -83,6 +83,10 @@ def set_global_variables(extra_args_provider=None, args_defaults={},
                        defaults=args_defaults,
                        ignore_unknown_args=ignore_unknown_args)
 
+    # for experiment purpose
+    if args.exp:
+        _handle_experiment_logs(args)
+
     # add for sub sequence length
     args.sub_seq_length = args.seq_length // args.tensor_model_parallel_size
 
@@ -93,6 +97,26 @@ def set_global_variables(extra_args_provider=None, args_defaults={},
     _set_adlr_autoresume(args)
     _set_timers()
 
+def _handle_experiment_logs(args):
+    exp_name = 'ws{}_tensor{}_pipe{}_seq{}_bs{}'.format(
+        args.world_size,
+        args.tensor_model_parallel_size,
+        args.pipeline_model_parallel_size,
+        args.seq_length,
+        args.global_batch_size
+    )
+
+    # create workspace
+    exp_path = f'./experiment/{exp_name}'
+    os.makedirs(exp_path, exist_ok=True)
+
+    # direct standard output to log file
+    log_file_path = os.path.join(exp_path, 'train.log')
+    f = open(log_file_path, 'a')
+    sys.stdout = f
+
+    # set tensorboard directory
+    args.tensorboard_dir = exp_path
 
 def _parse_args(extra_args_provider=None, defaults={},
                 ignore_unknown_args=False):

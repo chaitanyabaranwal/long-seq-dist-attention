@@ -48,12 +48,10 @@ def _communicate(tensor_send_next, tensor_send_prev, recv_prev, recv_next,
     tensor_recv_prev = None
     tensor_recv_next = None
     # tensor_shape = (args.seq_length, args.micro_batch_size, args.hidden_size)
+
+    # no scatter and gather tensor is needed
     tensor_shape = (args.sub_seq_length, args.micro_batch_size, args.hidden_size)
-    if args.scatter_gather_tensors_in_pipeline:
-        tensor_chunk_shape = reduce(operator.mul, tensor_shape, 1) // \
-            mpu.get_tensor_model_parallel_world_size()
-    else:
-        tensor_chunk_shape = tensor_shape
+    tensor_chunk_shape = tensor_shape
     dtype = args.params_dtype
     if args.fp32_residual_connection:
         dtype = torch.float
@@ -67,14 +65,6 @@ def _communicate(tensor_send_next, tensor_send_prev, recv_prev, recv_next,
                                        requires_grad=True,
                                        device=torch.cuda.current_device(),
                                        dtype=dtype)
-
-    # Split tensor into smaller chunks if using scatter-gather optimization.
-    if args.scatter_gather_tensors_in_pipeline:
-        if tensor_send_next is not None:
-            tensor_send_next = mpu.split_tensor_into_1d_equal_chunks(tensor_send_next)
-
-        if tensor_send_prev is not None:
-            tensor_send_prev = mpu.split_tensor_into_1d_equal_chunks(tensor_send_prev)
 
     # Send tensors in both the forward and backward directions as appropriate.
     if use_ring_exchange:
@@ -113,15 +103,6 @@ def _communicate(tensor_send_next, tensor_send_prev, recv_prev, recv_next,
     torch.cuda.synchronize()
 
     # If using scatter-gather optimization, gather smaller chunks.
-    if args.scatter_gather_tensors_in_pipeline:
-        if recv_prev:
-            tensor_recv_prev = mpu.gather_split_1d_tensor(
-                tensor_recv_prev).view(tensor_shape).requires_grad_()
-
-        if recv_next:
-            tensor_recv_next = mpu.gather_split_1d_tensor(
-                tensor_recv_next).view(tensor_shape).requires_grad_()
-
     return tensor_recv_prev, tensor_recv_next
 
 

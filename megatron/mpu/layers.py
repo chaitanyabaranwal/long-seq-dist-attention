@@ -554,7 +554,7 @@ class RingQK(torch.autograd.Function):
         args = get_args()
 
         # create local segment of attention score
-        attention_score = torch.empty(args.micro_batch_size, args.sub_seq_length, args.seq_length,
+        attention_score = torch.empty(args.micro_batch_size * args.num_attention_heads, args.sub_seq_length, args.seq_length,
                                       dtype=sub_q.dtype,
                                       device=torch.cuda.current_device()
                                       )
@@ -634,9 +634,9 @@ class RingAV(torch.autograd.Function):
         local_world_size = get_tensor_model_parallel_world_size()
         local_start_idx, local_end_idx = _calc_current_device_range(local_rank)
 
-        sub_attention_result = torch.zeros(args.micro_batch_size,
+        sub_attention_result = torch.zeros(args.micro_batch_size * args.num_attention_heads,
                                            args.sub_seq_length,
-                                           args.hidden_size,
+                                           args.hidden_size // args.num_attention_heads,
                                            device=torch.cuda.current_device(),
                                            dtype=attention_score.dtype)
 

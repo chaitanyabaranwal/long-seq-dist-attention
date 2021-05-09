@@ -382,6 +382,10 @@ class RingParallelAttention(MegatronModule):
         self.hidden_size = args.hidden_size
 
         projection_size = args.kv_channels * args.num_attention_heads
+        self.hidden_size_per_attention_head = mpu.divide(
+            projection_size, args.num_attention_heads)
+        self.num_attention_heads = args.num_attention_heads
+        self.world_size = mpu.get_tensor_model_parallel_world_size()
 
         # Strided linear layer.
         if attention_type == AttnType.self_attn:
@@ -410,13 +414,13 @@ class RingParallelAttention(MegatronModule):
             coeff = self.layer_number
             self.norm_factor *= coeff
 
-        # self.scale_mask_softmax = fusedscalemasksoftmax(
-        #     self.fp16, self.bf16,
-        #     self.attn_mask_type,
-        #     args.masked_softmax_fusion,
-        #     attention_mask_func,
-        #     self.attention_softmax_in_fp32,
-        #     coeff)
+        self.scale_mask_softmax = FusedScaleMaskSoftmax(
+            self.fp16, self.bf16,
+            self.attn_mask_type,
+            args.masked_softmax_fusion,
+            attention_mask_func,
+            self.attention_softmax_in_fp32,
+            coeff)
 
         # Dropout. Note that for a single iteration, this layer will generate
         # different outputs on different number of parallel partitions but
@@ -439,10 +443,14 @@ class RingParallelAttention(MegatronModule):
         # =====================
 
         if self.attention_type == AttnType.self_attn:
-            # Attention heads [sq, b, h] --> [sq, b, (3 * hn)]
+            # Attention heads [sq, b, h] --> [sq, b, (3 * hn * num_heads)]
             mixed_x_layer, _ = self.query_key_value(hidden_states)
 
-            # [sq, b, 3 * hn] --> 3 [sq, b, hn]
+            # [sq, b, num_heads, 3 * hn] --> 3 [sq, b, num_heads, hn]
+            new_tensor_shape = mixed_x_layer.size()[:-1] + \
+                               (self.num_attention_heads,
+                                3 * self.hidden_size_per_attention_head)
+            mixed_x_layer = mixed_x_layer.view(*new_tensor_shape)
             (query_layer,
              key_layer,
              value_layer) = mpu.split_tensor_along_last_dim(mixed_x_layer, 3)
@@ -473,25 +481,31 @@ class RingParallelAttention(MegatronModule):
         # Adjust key and value for inference
         # ==================================
 
-        # if layer_past is not None:
-        #     past_key, past_value = layer_past
-        #     key_layer = torch.cat((past_key.type_as(key_layer),
-        #                            key_layer), dim=0)
-        #     value_layer = torch.cat((past_value.type_as(value_layer),
-        #                              value_layer), dim=0)
-        # if get_key_value:
-        #     present = (key_layer, value_layer)
+        if layer_past is not None:
+            past_key, past_value = layer_past
+            key_layer = torch.cat((past_key.type_as(key_layer),
+                                   key_layer), dim=0)
+            value_layer = torch.cat((past_value.type_as(value_layer),
+                                     value_layer), dim=0)
+        if get_key_value:
+            present = (key_layer, value_layer)
 
         # ===================================
-        # Raw attention scores. [b, s, s]
+        # Raw attention scores. [b, num_heads, s, s]
         # ===================================
 
-        # # [sq, b, np, hn] -> [sq, b * np, hn]
-        # query_layer = query_layer.view(output_size[2],
-        #                                output_size[0] * output_size[1], -1)
-        # # [sk, b, np, hn] -> [sk, b * np, hn]
-        # key_layer = key_layer.view(output_size[3],
-        #                            output_size[0] * output_size[1], -1)
+        # [b, num_heads, sq, sk]
+        output_size = (query_layer.size(1),
+                       query_layer.size(2),
+                       query_layer.size(0),
+                       key_layer.size(0) * self.world_size)
+
+        # [sq, b, num_heads, hn] -> [sq, b * num_heads, hn]
+        query_layer = query_layer.view(output_size[2],
+                                       output_size[0] * output_size[1], -1)
+        # [sk, b, num_heads, hn] -> [sk, b * num_heads, hn]
+        key_layer = key_layer.view(key_layer.size(0),
+                                   output_size[0] * output_size[1], -1)
 
         # # preallocting result tensor: [b * np, sq, sk]
         # matmul_result = torch.empty(
@@ -509,11 +523,14 @@ class RingParallelAttention(MegatronModule):
         #     beta=0.0, alpha=(1.0/self.norm_factor))
 
         # [b, sq, sk]
-        attention_scores = mpu.RingQK.apply(query_layer.transpose(1, 0).contiguous(), key_layer.transpose(1, 0).contiguous())
+        attention_scores = mpu.RingQK.apply(
+            query_layer.transpose(0, 1).contiguous(), # [b * num_heads, sq, hn]
+            key_layer.transpose(0, 1).contiguous() # [b * num_heads, sk, hn]
+        )
         attention_scores /= self.norm_factor
 
-        # change view to [b, np, sq, sk]
-        # attention_scores = matmul_result.view(*output_size)
+        # change view to [b, num_heads, sq, sk]
+        attention_scores = attention_scores.view(*output_size)
 
         # ==================================================
         # Update attention mask for inference. [b, np, sq, sk]
@@ -536,13 +553,13 @@ class RingParallelAttention(MegatronModule):
         # Attention probs and dropout
         # ===========================
 
-        # attention scores and attention mask [b, sq, sk]
-        attention_scores = attention_scores.unsqueeze(1)
-        # attention_probs = self.scale_mask_softmax(attention_scores,
-        #                                           attention_mask)
+        # attention scores and attention mask [b, num_heads, sq, sk]
+        attention_probs = self.scale_mask_softmax(attention_scores,
+                                                  attention_mask)
 
-        attention_scores = attention_scores + attention_mask
-        attention_probs = F.softmax(attention_scores, dim=-1)
+        # attention_scores = attention_scores.unsqueeze(1)
+        # attention_scores = attention_scores + attention_mask
+        # attention_probs = F.softmax(attention_scores, dim=-1)
 
         # This is actually dropping out entire tokens to attend to, which might
         # seem a bit unusual, but is taken from the original Transformer paper.
@@ -554,40 +571,42 @@ class RingParallelAttention(MegatronModule):
         # =========================
 
         # value_layer -> context layer.
-        # [sk, b, np, hn] --> [b, np, sq, hn]
+        # [sk, b, num_heads, hn] --> [b, num_heads, sq, hn]
 
-        # context layer shape: [b, sq, hn]
-        # output_size = (value_layer.size(1),
-        #                query_layer.size(0),
-        #                value_layer.size(2))
+        # context layer shape: [b, num_heads, sq, hn]
+        output_size = (value_layer.size(1),
+                       value_layer.size(2),
+                       query_layer.size(0),
+                       value_layer.size(3))
         #
-        # # change view [sk, b * np, hn]
-        # value_layer = value_layer.view(value_layer.size(0),
-        #                                output_size[0] * output_size[1], -1)
-        #
-        # # change view [b * np, sq, sk]
-        # attention_probs = attention_probs.view(output_size[0] * output_size[1],
-        #                                        output_size[2], -1)
+        # # change view [sk, b * num_heads, hn]
+        value_layer = value_layer.contiguous().view(value_layer.size(0),
+                                       output_size[0] * output_size[1], -1)
 
-        # matmul: [b, sq, hn]
+        # # change view [b * num_heads, sq, sk]
+        attention_probs = attention_probs.view(attention_probs.size(0) * attention_probs.size(1),
+                                               attention_probs.size(2),
+                                               attention_probs.size(3))
+
+        # matmul: [b*num_heads, sq, hn]
         # context_layer = torch.bmm(attention_probs, value_layer.transpose(0, 1))
-        context_layer = mpu.RingAV.apply(attention_probs.squeeze(1).contiguous(), value_layer.transpose(1, 0).contiguous())
+        context_layer = mpu.RingAV.apply(attention_probs, value_layer.transpose(0, 1).contiguous())
 
-        # # change view [b, np, sq, hn]
-        # context_layer = context_layer.view(*output_size)
-        #
+        # # change view [b, num_heads, sq, hn]
+        context_layer = context_layer.view(*output_size)
+
         # # [b, np, sq, hn] --> [sq, b, np, hn]
-        # context_layer = context_layer.permute(2, 0, 1, 3).contiguous()
-        #
+        context_layer = context_layer.permute(2, 0, 1, 3).contiguous()
+
         # # [sq, b, np, hn] --> [sq, b, hp]
-        # new_context_layer_shape = context_layer.size()[:-2] + \
-        #     (self.hidden_size_per_partition,)
-        # context_layer = context_layer.view(*new_context_layer_shape)
+        new_context_layer_shape = context_layer.size()[:-2] + \
+            (self.hidden_size_per_attention_head * self.num_attention_heads,)
+        context_layer = context_layer.view(*new_context_layer_shape)
 
         # =================
         # Output. [sq, b, h]
         # =================
-        context_layer = context_layer.transpose(1, 0).contiguous()
+        # context_layer = context_layer.transpose(1, 0).contiguous()
         output, bias = self.dense(context_layer)
 
         if get_key_value:

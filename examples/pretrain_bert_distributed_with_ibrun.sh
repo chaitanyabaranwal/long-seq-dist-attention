@@ -43,7 +43,8 @@ python -m torch.distributed.launch $DISTRIBUTED_ARGS \
        --eval-interval 1000 \
        --eval-iters 10 \
        --fp16 \
-       --loss-scale 16384
+       --exp
+#       --loss-scale 16384
 
 #       --min-loss-scale 0.1
 #       --optimizer sgd
