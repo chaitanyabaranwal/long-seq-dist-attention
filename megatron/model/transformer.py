@@ -554,7 +554,6 @@ class RingParallelAttention(MegatronModule):
         # ===========================
 
         # attention scores and attention mask [b, num_heads, sq, sk]
-        print(attention_mask.shape)
         attention_probs = self.scale_mask_softmax(attention_scores,
                                                   attention_mask)
 

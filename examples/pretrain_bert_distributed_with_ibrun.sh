@@ -5,7 +5,7 @@ GPUS_PER_NODE=4
 NODE_RANK=$PMI_RANK
 WORLD_SIZE=$(($GPUS_PER_NODE*$NNODES))
 
-DATA_PATH=/scratch1/07825/franklee/projects/long-seq-transformer/data/wikipedia/my-bert_text_sentence
+DATA_PATH=/scratch1/07825/franklee/projects/long-seq-transformer/data/wikipedia/uncase/my-bert_text_sentence
 
 CHECKPOINT_PATH=/scratch1/07825/franklee/projects/long-seq-transformer/checkpoints/my-bert_checkpoints
 VOCAB_PATH=/scratch1/07825/franklee/projects/long-seq-transformer/model/vocab.txt
@@ -19,11 +19,11 @@ python -m torch.distributed.launch $DISTRIBUTED_ARGS \
        --num-layers 24 \
        --hidden-size 1024 \
        --num-attention-heads 16 \
-       --micro-batch-size 4 \
-       --global-batch-size 16 \
-       --seq-length 512 \
-       --max-position-embeddings 512 \
-       --train-iters 1000000 \
+       --micro-batch-size $MICRO_BATCH_SIZE \
+       --global-batch-size  $GLOBAL_BATCH_SIZE \
+       --seq-length $SEQ_LENGTH \
+       --max-position-embeddings $SEQ_LENGTH \
+       --train-iters 150 \
        --save $CHECKPOINT_PATH \
        --load $CHECKPOINT_PATH \
        --data-path $DATA_PATH \
@@ -38,11 +38,12 @@ python -m torch.distributed.launch $DISTRIBUTED_ARGS \
        --weight-decay 1e-2 \
        --clip-grad 1.0 \
        --lr-warmup-fraction .01 \
-       --log-interval 100 \
+       --log-interval 1 \
        --save-interval 10000 \
        --eval-interval 1000 \
        --eval-iters 10 \
        --fp16 \
+       --exp
 #       --exp
 #       --loss-scale 16384
 
