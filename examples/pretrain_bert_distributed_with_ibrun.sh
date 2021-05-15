@@ -16,9 +16,9 @@ python -m torch.distributed.launch $DISTRIBUTED_ARGS \
        pretrain_bert.py \
        --tensor-model-parallel-size $TENSOR_PARALLEL_SIZE \
        --pipeline-model-parallel-size $PIPELINE_PARALLEL_SIZE \
-       --num-layers 24 \
-       --hidden-size 1024 \
-       --num-attention-heads 16 \
+       --num-layers $NUM_LAYERS \
+       --hidden-size $HIDDEN_SIZE \
+       --num-attention-heads $NUM_HEADS \
        --micro-batch-size $MICRO_BATCH_SIZE \
        --global-batch-size  $GLOBAL_BATCH_SIZE \
        --seq-length $SEQ_LENGTH \

@@ -98,13 +98,16 @@ def set_global_variables(extra_args_provider=None, args_defaults={},
     _set_timers()
 
 def _handle_experiment_logs(args):
-    exp_name = 'ws{}_tensor{}_pipe{}_seq{}_micbs{}_glbbs{}'.format(
+    exp_name = 'ws{}_tensor{}_pipe{}_seq{}_micbs{}_glbbs{}_layers{}_heads{}_hidden{}'.format(
         args.world_size,
         args.tensor_model_parallel_size,
         args.pipeline_model_parallel_size,
         args.seq_length,
         args.micro_batch_size,
-        args.global_batch_size
+        args.global_batch_size,
+        args.num_layers,
+        args.num_attention_heads,
+        args.hidden_size
     )
 
     # create workspace
