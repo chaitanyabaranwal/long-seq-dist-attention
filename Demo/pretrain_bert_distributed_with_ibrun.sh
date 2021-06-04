@@ -1,14 +1,14 @@
 #!/bin/bash
 
-GPUS_PER_NODE=4
 # Change for multinode config
+GPUS_PER_NODE=4
 NODE_RANK=$PMI_RANK
 WORLD_SIZE=$(($GPUS_PER_NODE*$NNODES))
 
-DATA_PATH=/scratch1/07825/franklee/projects/long-seq-transformer/data/wikipedia/uncase/my-bert_text_sentence
-
-CHECKPOINT_PATH=/scratch1/07825/franklee/projects/long-seq-transformer/checkpoints/my-bert_checkpoints
-VOCAB_PATH=/scratch1/07825/franklee/projects/long-seq-transformer/model/vocab.txt
+# Change for training config
+DATA_PATH=<PATH_TO_BERT_DATASET>
+CHECKPOINT_PATH=<PATH_TO_CHECKPOINT>
+VOCAB_PATH=<PATH_TO_VOCAB_FILE>
 
 DISTRIBUTED_ARGS="--nproc_per_node $GPUS_PER_NODE --nnodes $NNODES --node_rank $NODE_RANK --master_addr $MASTER_ADDR --master_port $MASTER_PORT"
 
@@ -42,13 +42,4 @@ python -m torch.distributed.launch $DISTRIBUTED_ARGS \
        --save-interval 10000 \
        --eval-interval 1000 \
        --eval-iters 10 \
-       --fp16 \
-       --exp
-#       --exp
-#       --loss-scale 16384
-
-#       --min-loss-scale 0.1
-#       --optimizer sgd
-#       --fp16-lm-cross-entropy
-
-rm -rf ../checkpoints/*
+       --fp16

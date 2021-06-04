@@ -11,10 +11,7 @@ layer=${7:-"24"}
 hidden=${8:-"1024"}
 heads=${9:-"16"}
 
-
-source ~/miniconda3/bin/activate seq 
-
-python ./TACC/get_host_ip_addr.py > "./HOST"
+python ./demo/get_host_ip_addr.py > "./HOST"
 ADDR=`cat ./HOST`
 export IBRUN_TASKS_PER_NODE=1
 export MASTER_ADDR=$ADDR
@@ -29,4 +26,4 @@ export NUM_LAYERS=$layer
 export HIDDEN_SIZE=$hidden
 export NUM_HEADS=$heads
 
-ibrun -np $np singularity exec --nv ../pytorch18.simg  bash ./examples/pretrain_bert_distributed_with_ibrun.sh
+ibrun -np $np singularity exec --nv ../pytorch18.simg  bash ./demo/pretrain_bert_distributed_with_ibrun.sh

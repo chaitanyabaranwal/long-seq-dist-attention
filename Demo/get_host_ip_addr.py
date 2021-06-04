@@ -1,12 +1,6 @@
 #!/usr/bin/env python
 # -*- encoding: utf-8 -*-
-'''
-@file        : get_host_ip_addr
-@description :
-@time        : 2021/4/19 8:26 pm
-@author      : Li Shenggui
-@version     : 1.0
-'''
+
 
 from pyroute2 import NDB
 
