@@ -128,8 +128,11 @@ dmypy.json
 .pyre/
 
 # torch data
-data/
+# data/
+experiment/
 .vscode/
 dllb.log
 
 .DS_Store
+HOST
+
