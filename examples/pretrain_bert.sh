@@ -2,23 +2,24 @@
 
 RANK=0
 WORLD_SIZE=1
-DATA_PATH=<Specify path and file prefix>_text_sentence
-CHECKPOINT_PATH=<Specify path>
+DATA_PATH=my-bert_text_sentence
+CHECKPOINT_PATH=checkpoints/my-bert_checkpoints
+VOCAB_PATH=../model/bert-large-uncased-vocab.txt
 
 python pretrain_bert.py \
-       --num-layers 24 \
-       --hidden-size 1024 \
-       --num-attention-heads 16 \
-       --micro-batch-size 4 \
-       --global-batch-size 8 \
-       --seq-length 512 \
-       --max-position-embeddings 512 \
-       --train-iters 2000000 \
+       --num-layers $NUM_LAYERS \
+       --hidden-size $HIDDEN_SIZE \
+       --num-attention-heads $NUM_HEADS \
+       --micro-batch-size $MICRO_BATCH_SIZE \
+       --global-batch-size $GLOBAL_BATCH_SIZE \
+       --seq-length $SEQ_LENGTH \
+       --max-position-embeddings $SEQ_LENGTH \
+       --train-iters $TRAIN_ITERS \
        --lr-decay-iters 990000 \
        --save $CHECKPOINT_PATH \
        --load $CHECKPOINT_PATH \
        --data-path $DATA_PATH \
-       --vocab-file bert-vocab.txt \
+       --vocab-file $VOCAB_PATH \
        --data-impl mmap \
        --split 949,50,1 \
        --lr 0.0001 \
@@ -32,3 +33,6 @@ python pretrain_bert.py \
        --eval-interval 1000 \
        --eval-iters 10 \
        --fp16
+
+rm -rf ./checkpoints/*
+
