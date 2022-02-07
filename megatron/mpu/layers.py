@@ -447,10 +447,11 @@ class RowParallelLinear(torch.nn.Module):
 
 
 class Linear(torch.nn.Module):
-    """Linear layer with column parallelism.
+    """
+    Linear layer with no parallelism. This is used because all linear operations
+    in sequence parallelism are not computed in a row or column parallel fashion.
 
-    The linear layer is defined as Y = XA + b. A is parallelized along
-    its second dimension as A = [A_1, ..., A_p].
+    The linear layer is defined as Y = XA + b.
 
     Arguments:
         input_size: first dimension of matrix A.
@@ -694,3 +695,85 @@ class RingAV(torch.autograd.Function):
                 sub_v.transpose(2, 1))
 
         return grad_attention_score, grad_v
+
+#############################################
+# NOTE: for LinformerRingParallelAttention  #
+#############################################
+
+"""
+Ring-parallel self attention communication mechanism, which is combined
+with the linear complexity Transformer Linformer to reduce attention
+computation complexity even further.
+
+Original paper can be found at https://arxiv.org/abs/2006.04768.
+
+Here, what happens is that the (k * d) projected key/value matrices are communicated in
+ring fashion, multiplied with the current query/attention matrix chunk and added to the 
+computed attention/output matrix chunk.
+"""
+
+class LinformerRingQK(torch.autograd.Function):
+    
+    @staticmethod
+    def forward(ctx, sub_q, sub_k):
+        # Get arguments
+        args = get_args()
+        local_rank = get_tensor_model_parallel_rank()
+        local_world_size = get_tensor_model_parallel_world_size()
+
+        # save tensors for backward pass
+        ctx.save_for_backward(sub_q, sub_k)
+
+        # create local segment for attention score
+        attention_score = torch.zeros(
+            args.micro_batch_size * args.num_attention_heads, 
+            args.sub_seq_length,
+            args.linformer_k,
+            dtype=sub_q.dtype,
+            device=torch.cuda.current_device()
+        )
+
+        # collect all the projected key matrices into one
+        torch.distributed.all_reduce(sub_k, group=get_tensor_model_parallel_group())
+
+        # compute local QK^T
+        attention_score = torch.matmul(sub_q, sub_k)
+        
+        return attention_score
+
+    @staticmethod
+    def backward(ctx, grad_output):
+        pass
+
+class LinformerRingAV(torch.autograd.Function):
+
+    @staticmethod
+    def forward(ctx, attention_score, sub_v):
+        # Get arguments
+        args = get_args()
+        local_rank = get_tensor_model_parallel_rank()
+        local_world_size = get_tensor_model_parallel_world_size()
+
+        # save tensors for backward pass
+        ctx.save_for_backward(attention_score, sub_v)
+
+        # create local segment for attention result
+        sub_attention_result = torch.zeros(
+            args.micro_batch_size * args.num_attention_heads, 
+            args.sub_seq_length,
+            args.hidden_size // args.num_attention_heads,
+            dtype=attention_score.dtype,
+            device=torch.cuda.current_device()
+        )
+
+        # collect all the projected value matrices into one
+        torch.distributed.all_reduce(sub_v, group=get_tensor_model_parallel_group())
+
+        # compute local AV
+        sub_attention_result = torch.matmul(attention_score, sub_v)
+
+        return sub_attention_result
+    
+    @staticmethod
+    def backward(ctx, grad_output):
+        pass
