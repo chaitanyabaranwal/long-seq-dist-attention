@@ -710,6 +710,11 @@ Original paper can be found at https://arxiv.org/abs/2006.04768.
 Here, what happens is that the (k * d) projected key/value matrices are communicated in
 ring fashion, multiplied with the current query/attention matrix chunk and added to the 
 computed attention/output matrix chunk.
+
+Formulas for calculating gradient of a matrix
+C = AB => grad_A = grad_C * B^T, grad_B = A^T * grad_C
+C = A^T * B => grad_A = B * (grad_C)^T, grad_B = A * grad_C
+C = A * B^T => grad_A = grad_C * B, grad_B = (grad_C)^T * A 
 """
 
 class LinformerRingQK(torch.autograd.Function):
@@ -718,15 +723,10 @@ class LinformerRingQK(torch.autograd.Function):
     def forward(ctx, sub_q, sub_k):
         # Get arguments
         args = get_args()
-        local_rank = get_tensor_model_parallel_rank()
-        local_world_size = get_tensor_model_parallel_world_size()
-
-        # save tensors for backward pass
-        ctx.save_for_backward(sub_q, sub_k)
 
         # create local segment for attention score
         attention_score = torch.zeros(
-            args.micro_batch_size * args.num_attention_heads, 
+            args.micro_batch_size * args.num_attention_heads,
             args.sub_seq_length,
             args.linformer_k,
             dtype=sub_q.dtype,
@@ -736,6 +736,9 @@ class LinformerRingQK(torch.autograd.Function):
         # collect all the projected key matrices into one
         torch.distributed.all_reduce(sub_k, group=get_tensor_model_parallel_group())
 
+        # save tensors for backward pass
+        ctx.save_for_backward(sub_q, sub_k)
+
         # compute local QK^T
         attention_score = torch.matmul(sub_q, sub_k)
         
@@ -743,7 +746,24 @@ class LinformerRingQK(torch.autograd.Function):
 
     @staticmethod
     def backward(ctx, grad_output):
-        pass
+        # Get arguments
+        args = get_args()
+        sub_q, sub_k = ctx.saved_tensors
+        local_world_size = get_tensor_model_parallel_world_size()
+
+        # calculate gradient of sub_q
+        # we can directly calculate without communication because
+        # the saved tensor was already the sum of individual tensors
+        grad_q = torch.matmul(grad_output, sub_k.transpose(1, 2))
+
+        # calculate gradient of sub_k
+        grad_k = torch.matmul(sub_q.transpose(2, 1), grad_output)
+        # we divide by world size because the output gradient is calculated based on the sum
+        # of individual key projections
+        # TODO: Discuss with Shenggui if this is correct approach
+        grad_k /= local_world_size
+
+        return grad_q, grad_k
 
 class LinformerRingAV(torch.autograd.Function):
 
@@ -751,11 +771,6 @@ class LinformerRingAV(torch.autograd.Function):
     def forward(ctx, attention_score, sub_v):
         # Get arguments
         args = get_args()
-        local_rank = get_tensor_model_parallel_rank()
-        local_world_size = get_tensor_model_parallel_world_size()
-
-        # save tensors for backward pass
-        ctx.save_for_backward(attention_score, sub_v)
 
         # create local segment for attention result
         sub_attention_result = torch.zeros(
@@ -769,6 +784,9 @@ class LinformerRingAV(torch.autograd.Function):
         # collect all the projected value matrices into one
         torch.distributed.all_reduce(sub_v, group=get_tensor_model_parallel_group())
 
+        # save tensors for backward pass
+        ctx.save_for_backward(attention_score, sub_v)
+
         # compute local AV
         sub_attention_result = torch.matmul(attention_score, sub_v)
 
@@ -776,4 +794,21 @@ class LinformerRingAV(torch.autograd.Function):
     
     @staticmethod
     def backward(ctx, grad_output):
-        pass
+        # Get arguments
+        args = get_args()
+        attention_score, sub_v = ctx.saved_tensors
+        local_world_size = get_tensor_model_parallel_world_size()
+
+        # calculate gradient of attention_score
+        # we can directly calculate without communication because
+        # the saved tensor was already the sum of individual tensors
+        grad_attention_score = torch.matmul(grad_output, sub_v.transpose(1, 2))
+
+        # calculate gradient of sub_k
+        grad_v = torch.matmul(attention_score.transpose(2, 1), grad_output)
+        # we divide by world size because the output gradient is calculated based on the sum
+        # of individual key projections
+        # TODO: Discuss with Shenggui if this is correct approach
+        grad_v /= local_world_size
+
+        return grad_attention_score, grad_v
