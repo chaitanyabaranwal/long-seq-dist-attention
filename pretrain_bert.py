@@ -52,6 +52,8 @@ def model_provider(pre_process=True, post_process=True):
 def get_batch(data_iterator):
     """Build the batch."""
 
+    args = get_args()
+
     # Items and their type.
     keys = ['text', 'types', 'labels', 'is_random', 'loss_mask', 'padding_mask']
     datatype = torch.int64
@@ -94,7 +96,13 @@ def get_batch(data_iterator):
     sentence_order = data_b['is_random'].long()
     loss_mask = data_b['loss_mask'][:, sub_seq_start:sub_seq_end].float()
     lm_labels = data_b['labels'][:, sub_seq_start:sub_seq_end].long()
-    padding_mask = data_b['padding_mask'].long()
+    # If Linformer is enabled, that means the masking mechanism is different, 
+    # since instead of the attention matrix the K and V matrices are masked 
+    # individually. So we only need part of the padding mask.
+    if args.linformer_k:
+        padding_mask = data_b['padding_mask'][:, sub_seq_start:sub_seq_end].long()
+    else:
+        padding_mask = data_b['padding_mask'].long()
 
     return tokens, types, sentence_order, loss_mask, lm_labels, padding_mask
 

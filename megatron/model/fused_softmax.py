@@ -101,6 +101,7 @@ class FusedScaleMaskSoftmax(torch.nn.Module):
         mask_func,
         softmax_in_fp32,
         scale,
+        linformer_k=None,
     ):
         super(FusedScaleMaskSoftmax, self).__init__()
         self.input_in_fp16 = input_in_fp16
@@ -113,6 +114,7 @@ class FusedScaleMaskSoftmax(torch.nn.Module):
         self.mask_func = mask_func
         self.softmax_in_fp32 = softmax_in_fp32
         self.scale = scale
+        self.linformer_k = linformer_k
 
         assert (
             self.scale is None or softmax_in_fp32
@@ -128,8 +130,9 @@ class FusedScaleMaskSoftmax(torch.nn.Module):
 
         # constraints on various tensor dimensions to enable warp based
         # optimization and upper triangular optimization (for causal mask)
+        # currently do not invoke if Linformer is true, to give more control over masking
         custom_kernel_constraint = key_seq_len > 16 and key_seq_len <= 2048 and \
-            query_seq_len % 4 == 0 and attn_batch_size % 4 == 0
+            query_seq_len % 4 == 0 and attn_batch_size % 4 == 0 and not self.linformer_k
 
         # invoke custom kernel
         if self.input_in_float16 and mask is not None and \

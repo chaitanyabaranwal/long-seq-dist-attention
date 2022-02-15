@@ -690,7 +690,9 @@ class LinformerRingParallelAttention(MegatronModule):
             args.masked_softmax_fusion,
             attention_mask_func,
             self.attention_softmax_in_fp32,
-            coeff)
+            coeff,
+            args.linformer_k
+        )
 
         # Dropout. Note that for a single iteration, this layer will generate
         # different outputs on different number of parallel partitions but
@@ -764,8 +766,16 @@ class LinformerRingParallelAttention(MegatronModule):
         query_layer = query_layer.view(output_size[2],
                                        output_size[0] * output_size[1], -1)
         
-        # [sk, b, num_heads, hn] -> [sk, b * num_heads, hn]
-        key_layer = key_layer.view(key_layer.size(0),
+        # [sk, b, num_heads, hn] -> [b, num_heads, sk, hn]
+        # Also apply attention mask here, since attention mask mechanism for Linformer
+        # is different from normal Transformer
+        key_layer = key_layer.view(output_size[0], output_size[1],
+                                   key_layer.size(0), -1)
+        assert attention_mask.size(0) == key_layer.size(0) and attention_mask.size(2) == key_layer.size(2), \
+            'Attention mask dimensions do not match key matrix dimensions'
+        key_layer.masked_fill_(attention_mask, 0.0)
+        # [b, num_heads, sk, hn] -> [sk, b * num_heads, hn]
+        key_layer = key_layer.view(key_layer.size(2),
                                    output_size[0] * output_size[1], -1)
         # [sk, b * num_heads, hn] -> [b * num_heads, hn, sk]
         key_layer = key_layer.view(
@@ -812,9 +822,18 @@ class LinformerRingParallelAttention(MegatronModule):
                        value_layer.size(2),
                        query_layer.size(0),
                        value_layer.size(3))
+
+         # [sk, b, num_heads, hn] -> [b, num_heads, sk, hn]
+        # Also apply attention mask here, since attention mask mechanism for Linformer
+        # is different from normal Transformer
+        value_layer = value_layer.view(output_size[0], output_size[1],
+                                   key_layer.size(0), -1)
+        assert attention_mask.size(0) == value_layer.size(0) and attention_mask.size(2) == value_layer.size(2), \
+            'Attention mask dimensions do not match value matrix dimensions'
+        value_layer.masked_fill_(attention_mask, 0.0)
         #
         # # change view [sk, b * num_heads, hn]
-        value_layer = value_layer.contiguous().view(value_layer.size(0),
+        value_layer = value_layer.contiguous().view(value_layer.size(2),
                                        output_size[0] * output_size[1], -1)
         # [sk, b * num_heads, hn] -> [b * num_heads, hn, sk]
         value_layer = value_layer.view(

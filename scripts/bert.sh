@@ -6,12 +6,11 @@ module load nccl
 np=${1:-"2"}
 pipeline=${2:-"2"}
 tensor=${3:-"4"}
-seq=${4:-"256"}
+seq=${4:-"128"}
 mic_bs=${5:-"2"}
 glb_bs=${6:-"8"}
 layer=${7:-"2"}
 hidden=${8:-"256"}
-linformer_k=${9:-"256"}
 heads=${10:-"8"}
 iters=${11:-"10"}
 
@@ -26,7 +25,6 @@ export SEQ_LENGTH=$seq
 export MICRO_BATCH_SIZE=$mic_bs
 export GLOBAL_BATCH_SIZE=$glb_bs
 export NUM_LAYERS=$layer
-export LINFORMER_K=$linformer_k
 export HIDDEN_SIZE=$hidden
 export NUM_HEADS=$heads
 export TRAIN_ITERS=$iters
