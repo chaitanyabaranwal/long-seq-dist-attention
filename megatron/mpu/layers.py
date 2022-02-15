@@ -758,10 +758,6 @@ class LinformerRingQK(torch.autograd.Function):
 
         # calculate gradient of sub_k
         grad_k = torch.matmul(sub_q.transpose(2, 1), grad_output)
-        # we divide by world size because the output gradient is calculated based on the sum
-        # of individual key projections
-        # TODO: Discuss with Shenggui if this is correct approach
-        grad_k /= local_world_size
 
         return grad_q, grad_k
 
@@ -806,9 +802,5 @@ class LinformerRingAV(torch.autograd.Function):
 
         # calculate gradient of sub_k
         grad_v = torch.matmul(attention_score.transpose(2, 1), grad_output)
-        # we divide by world size because the output gradient is calculated based on the sum
-        # of individual key projections
-        # TODO: Discuss with Shenggui if this is correct approach
-        grad_v /= local_world_size
 
         return grad_attention_score, grad_v
