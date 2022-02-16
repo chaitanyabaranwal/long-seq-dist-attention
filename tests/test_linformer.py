@@ -1,25 +1,104 @@
 import torch
 import torch.distributed as dist
 import torch.multiprocessing as mp
-import pytest
+import os
 
 from functools import partial
 
-def check_linformer_ring_qk(rank, world_size):
-    # params
-    batch_size = 4
-    num_heads = 4
-    seq_length = 64
-    attention_head_size = 64
-    sub_seq_length = seq_length // world_size
-    linformer_k = 32
+# params
+world_size = 4
+batch_size = 4
+num_heads = 4
+seq_length = 64
+attention_head_size = 64
+sub_seq_length = seq_length // world_size
+linformer_k = 32
 
+class LinformerRingQK(torch.autograd.Function):
+    @staticmethod
+    def forward(ctx, sub_q, sub_k):
+        global batch_size, num_heads, sub_seq_length, linformer_k
+        # create local segment for attention score
+        attention_score = torch.zeros(
+            batch_size * num_heads,
+            sub_seq_length,
+            linformer_k,
+            dtype=sub_q.dtype,
+            device=torch.cuda.current_device()
+        )
+
+        # collect all the projected key matrices into one
+        dist.all_reduce(sub_k)
+
+        # save tensors for backward pass
+        ctx.save_for_backward(sub_q, sub_k)
+
+        # compute local QK^T
+        attention_score = torch.matmul(sub_q, sub_k)
+        
+        return attention_score
+
+    @staticmethod
+    def backward(ctx, grad_output):
+        # Get arguments
+        sub_q, sub_k = ctx.saved_tensors
+
+        # calculate gradient of sub_q
+        # we can directly calculate without communication because
+        # the saved tensor was already the sum of individual tensors
+        grad_q = torch.matmul(grad_output, sub_k.transpose(1, 2))
+
+        # calculate gradient of sub_k
+        grad_k = torch.matmul(sub_q.transpose(2, 1), grad_output)
+
+        return grad_q, grad_k
+
+class LinformerRingAV(torch.autograd.Function):
+    @staticmethod
+    def forward(ctx, attention_score, sub_v):
+        global batch_size, num_heads, sub_seq_length, attention_head_size
+        # create local segment for attention result
+        sub_attention_result = torch.zeros(
+            batch_size * num_heads, 
+            sub_seq_length,
+            attention_head_size // num_heads,
+            dtype=attention_score.dtype,
+            device=torch.cuda.current_device()
+        )
+
+        # collect all the projected value matrices into one
+        dist.all_reduce(sub_v)
+
+        # save tensors for backward pass
+        ctx.save_for_backward(attention_score, sub_v)
+
+        # compute local AV
+        sub_attention_result = torch.matmul(attention_score, sub_v)
+
+        return sub_attention_result
+    
+    @staticmethod
+    def backward(ctx, grad_output):
+        # Get arguments
+        attention_score, sub_v = ctx.saved_tensors
+
+        # calculate gradient of attention_score
+        # we can directly calculate without communication because
+        # the saved tensor was already the sum of individual tensors
+        grad_attention_score = torch.matmul(grad_output, sub_v.transpose(1, 2))
+
+        # calculate gradient of sub_k
+        grad_v = torch.matmul(attention_score.transpose(2, 1), grad_output)
+
+        return grad_attention_score, grad_v
+
+def check_linformer_ring_qk(rank, world_size):
     # create master tensors
-    q = torch.rand(batch_size*num_heads, seq_length, attention_head_size).cuda()
-    dist.broadcast(q, src=0, group=???)
-    sub_k = torch.rand(batch_size*num_heads, attention_head_size, linformer_k).cuda()
+    q = torch.rand(batch_size*num_heads, seq_length, attention_head_size, dtype=torch.float16).cuda()
+    dist.broadcast(q, src=0)
+    sub_k = torch.rand(batch_size*num_heads, attention_head_size, linformer_k, dtype=torch.float16).cuda()
     k = sub_k.clone().detach()
-    dist.all_reduce(k, group=???)
+    dist.all_reduce(k)
 
     # create distributed tensors
     sub_q = q.clone()[:, rank*sub_seq_length:(rank+1)*sub_seq_length].contiguous()
@@ -38,8 +117,7 @@ def check_linformer_ring_qk(rank, world_size):
     a = torch.matmul(q, k)
 
     # compute distributed attention scores
-    linformer_ring_qk = megatron.mpu.layers.LinformerRingQK.apply
-    sub_a = linformer_ring_qk(sub_q, sub_k)
+    sub_a = LinformerRingQK.apply(sub_q, sub_k)
 
     # check master and distributed attention scores
     sub_master_a = a[:, rank*sub_seq_length:(rank+1)*sub_seq_length]
@@ -59,8 +137,8 @@ def check_linformer_ring_qk(rank, world_size):
     assert torch.allclose(sub_q.grad, partial_master_q_grad, rtol=1e-5, atol=1e-2), \
         'partial Q gradient does not match'
     sub_k_grad = sub_k.grad.clone()
-    dist.all_reduce(sub_k_grad, group=???)
-    assert torch.allclose(sub_k_grad, k.grad, rol=1e-5, ato=1e-2), \
+    dist.all_reduce(sub_k_grad)
+    assert torch.allclose(sub_k_grad, k.grad, rtol=1e-5, atol=1e-2), \
         'sum of partial K gradients does not match master K gradient'
 
 
@@ -74,11 +152,11 @@ def check_linformer_ring_av(rank, world_size):
     linformer_k = 32
 
     # create master tensors
-    a = torch.rand(batch_size*num_heads, seq_length, linformer_k).cuda()
-    dist.broadcast(q, src=0, group=???)
-    sub_v = torch.rand(batch_size*num_heads, linformer_k, attention_head_size).cuda()
-    v = sub_k.clone().detach()
-    dist.all_reduce(v, group=???)
+    a = torch.rand(batch_size*num_heads, seq_length, linformer_k, dtype=torch.float16).cuda()
+    dist.broadcast(a, src=0)
+    sub_v = torch.rand(batch_size*num_heads, linformer_k, attention_head_size, dtype=torch.float16).cuda()
+    v = sub_v.clone().detach()
+    dist.all_reduce(v)
 
     # create distributed tensors
     sub_a = a.clone()[:, rank*sub_seq_length:(rank+1)*sub_seq_length].contiguous()
@@ -97,8 +175,7 @@ def check_linformer_ring_av(rank, world_size):
     out = torch.matmul(a, v)
 
     # compute distributed attention scores
-    linformer_ring_av = megatron.mpu.layers.LinformerRingAV.apply
-    sub_out = linformer_ring_av(sub_a, sub_v)
+    sub_out = LinformerRingAV.apply(sub_a, sub_v)
 
     # check master and distributed attention scores
     sub_master_out = out[:, rank*sub_seq_length:(rank+1)*sub_seq_length]
@@ -118,24 +195,39 @@ def check_linformer_ring_av(rank, world_size):
     assert torch.allclose(sub_a.grad, partial_master_a_grad, rtol=1e-5, atol=1e-2), \
         'partial A gradient does not match'
     sub_v_grad = sub_v.grad.clone()
-    dist.all_reduce(sub_v_grad, group=???)
-    assert torch.allclose(sub_v_grad, v.grad, rol=1e-5, ato=1e-2), \
+    dist.all_reduce(sub_v_grad)
+    assert torch.allclose(sub_v_grad, v.grad, rtol=1e-5, atol=1e-2), \
         'sum of partial V gradients does not match master V gradient'
 
 
 def run_test(rank, world_size):
-    # how to initialize?
+    os.environ['MASTER_ADDR'] = 'localhost'
+    os.environ['MASTER_PORT'] = '29100'
 
+    # how to initialize?
+    dist.init_process_group(
+        world_size=world_size,
+        rank=rank,
+        backend='nccl',
+    )
+
+    # bind process to a single GPU
+    torch.cuda.set_device(rank)
+
+    print(f'Rank {rank}: Initialization finished...')
     
+    print(f'Rank {rank}: Starting Linformer-Ring-QK test...')
     check_linformer_ring_qk(rank, world_size)
+    print(f'Rank {rank}: Finished Linformer-Ring-QK test...')
+    print(f'Rank {rank}: Starting Linformer-Ring-AV test...')
     check_linformer_ring_av(rank, world_size)
+    print(f'Rank {rank}: Finished Linformer-Ring-AV test...')
 
     torch.cuda.empty_cache()
 
 
-@pytest.mark.dist
 def test_sequence():
-    world_size = 4
+    global world_size
     run_func = partial(run_test, world_size=world_size)
     mp.spawn(run_func, nprocs=world_size)
 
