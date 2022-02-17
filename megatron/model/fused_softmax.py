@@ -101,7 +101,7 @@ class FusedScaleMaskSoftmax(torch.nn.Module):
         mask_func,
         softmax_in_fp32,
         scale,
-        linformer_k=None,
+        linformer_k=None
     ):
         super(FusedScaleMaskSoftmax, self).__init__()
         self.input_in_fp16 = input_in_fp16

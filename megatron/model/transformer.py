@@ -639,7 +639,7 @@ class LinformerRingParallelAttention(MegatronModule):
                  layer_number,
                  attention_type=AttnType.self_attn,
                  attn_mask_type=AttnMaskType.padding):
-        super(RingParallelAttention, self).__init__()
+        super(LinformerRingParallelAttention, self).__init__()
         args = get_args()
         self.fp16 = args.fp16
         self.bf16 = args.bf16
@@ -773,7 +773,7 @@ class LinformerRingParallelAttention(MegatronModule):
                                    key_layer.size(0), -1)
         assert attention_mask.size(0) == key_layer.size(0) and attention_mask.size(2) == key_layer.size(2), \
             'Attention mask dimensions do not match key matrix dimensions'
-        key_layer.masked_fill_(attention_mask, 0.0)
+        key_layer = key_layer.masked_fill(attention_mask, 0.0)
         # [b, num_heads, sk, hn] -> [sk, b * num_heads, hn]
         key_layer = key_layer.view(key_layer.size(2),
                                    output_size[0] * output_size[1], -1)
@@ -827,10 +827,10 @@ class LinformerRingParallelAttention(MegatronModule):
         # Also apply attention mask here, since attention mask mechanism for Linformer
         # is different from normal Transformer
         value_layer = value_layer.view(output_size[0], output_size[1],
-                                   key_layer.size(0), -1)
+                                   value_layer.size(0), -1)
         assert attention_mask.size(0) == value_layer.size(0) and attention_mask.size(2) == value_layer.size(2), \
             'Attention mask dimensions do not match value matrix dimensions'
-        value_layer.masked_fill_(attention_mask, 0.0)
+        value_layer = value_layer.masked_fill(attention_mask, 0.0)
         #
         # # change view [sk, b * num_heads, hn]
         value_layer = value_layer.contiguous().view(value_layer.size(2),
@@ -990,19 +990,25 @@ class ParallelTransformerLayer(MegatronModule):
         # NOTE: for RingParallelAttention  #
         ####################################
         # Self attention.
-        self.self_attention = RingParallelAttention(
-            init_method,
-            output_layer_init_method,
-            layer_number,
-            attention_type=AttnType.self_attn,
-            attn_mask_type=self_attn_mask_type)
+        # Use Linformer based layer if applicable.
+        if args.linformer_k:
+            self.self_attention = LinformerRingParallelAttention(
+                init_method,
+                output_layer_init_method,
+                torch.nn.init.xavier_normal_,
+                layer_number,
+                attention_type=AttnType.self_attn,
+                attn_mask_type=self_attn_mask_type
+            )
+        else:
+            self.self_attention = RingParallelAttention(
+                init_method,
+                output_layer_init_method,
+                layer_number,
+                attention_type=AttnType.self_attn,
+                attn_mask_type=self_attn_mask_type
+            )
 
-        # self.self_attention = ParallelAttention(
-        #     init_method,
-        #     output_layer_init_method,
-        #     layer_number,
-        #     attention_type=AttnType.self_attn,
-        #     attn_mask_type=self_attn_mask_type)
         self.hidden_dropout = args.hidden_dropout
         self.bias_dropout_fusion = args.bias_dropout_fusion
 

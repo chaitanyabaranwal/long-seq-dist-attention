@@ -11,6 +11,7 @@ mic_bs=${5:-"2"}
 glb_bs=${6:-"8"}
 layer=${7:-"2"}
 hidden=${8:-"256"}
+linformer_k=${9:-"128"}
 heads=${10:-"8"}
 iters=${11:-"10"}
 
@@ -26,6 +27,7 @@ export MICRO_BATCH_SIZE=$mic_bs
 export GLOBAL_BATCH_SIZE=$glb_bs
 export NUM_LAYERS=$layer
 export HIDDEN_SIZE=$hidden
+export LINFORMER_K=$linformer_k
 export NUM_HEADS=$heads
 export TRAIN_ITERS=$iters
 
