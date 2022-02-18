@@ -690,8 +690,7 @@ class LinformerRingParallelAttention(MegatronModule):
             args.masked_softmax_fusion,
             attention_mask_func,
             self.attention_softmax_in_fp32,
-            coeff,
-            args.linformer_k
+            coeff
         )
 
         # Dropout. Note that for a single iteration, this layer will generate
@@ -752,9 +751,10 @@ class LinformerRingParallelAttention(MegatronModule):
         if get_key_value:
             present = (key_layer, value_layer)
 
-        # ===================================
-        # Raw attention scores. [b, num_heads, s, s]
-        # ===================================
+        # =============================================
+        # Apply attention mask to key and value
+        # because Linformer mask mechanism is different
+        # =============================================
 
         # [b, num_heads, sq, lin_k]
         output_size = (query_layer.size(1),
@@ -762,18 +762,28 @@ class LinformerRingParallelAttention(MegatronModule):
                        query_layer.size(0),
                        self.linformer_k)
 
-        # [sq, b, num_heads, hn] -> [sq, b * num_heads, hn]
-        query_layer = query_layer.view(output_size[2],
-                                       output_size[0] * output_size[1], -1)
-        
         # [sk, b, num_heads, hn] -> [b, num_heads, sk, hn]
-        # Also apply attention mask here, since attention mask mechanism for Linformer
-        # is different from normal Transformer
         key_layer = key_layer.view(output_size[0], output_size[1],
                                    key_layer.size(0), -1)
         assert attention_mask.size(0) == key_layer.size(0) and attention_mask.size(2) == key_layer.size(2), \
             'Attention mask dimensions do not match key matrix dimensions'
         key_layer = key_layer.masked_fill(attention_mask, 0.0)
+
+        # [sk, b, num_heads, hn] -> [b, num_heads, sk, hn]
+        value_layer = value_layer.view(output_size[0], output_size[1],
+                                   value_layer.size(0), -1)
+        assert attention_mask.size(0) == value_layer.size(0) and attention_mask.size(2) == value_layer.size(2), \
+            'Attention mask dimensions do not match value matrix dimensions'
+        value_layer = value_layer.masked_fill(attention_mask, 0.0)
+
+        # ===================================
+        # Raw attention scores. [b, num_heads, s, s]
+        # ===================================
+
+        # [sq, b, num_heads, hn] -> [sq, b * num_heads, hn]
+        query_layer = query_layer.view(output_size[2],
+                                       output_size[0] * output_size[1], -1)
+        
         # [b, num_heads, sk, hn] -> [sk, b * num_heads, hn]
         key_layer = key_layer.view(key_layer.size(2),
                                    output_size[0] * output_size[1], -1)
@@ -802,6 +812,12 @@ class LinformerRingParallelAttention(MegatronModule):
         # ===========================
 
         # attention scores and attention mask [b, num_heads, sq, sk]
+        attention_mask = attention_mask.broadcast_to(
+            attention_mask.size(0),
+            attention_mask.size(1),
+            attention_mask.size(2),
+            self.linformer_k
+        ).contiguous()
         attention_probs = self.scale_mask_softmax(attention_scores,
                                                   attention_mask)
 
@@ -815,22 +831,13 @@ class LinformerRingParallelAttention(MegatronModule):
         # =========================
 
         # value_layer -> context layer.
-        # [sk, b, num_heads, hn] --> [b, num_heads, sq, hn]
+        # [b, num_heads, sk, hn] --> [b, num_heads, sq, hn]
 
         # context layer shape: [b, num_heads, sq, hn]
-        output_size = (value_layer.size(1),
-                       value_layer.size(2),
+        output_size = (value_layer.size(0),
+                       value_layer.size(1),
                        query_layer.size(0),
                        value_layer.size(3))
-
-         # [sk, b, num_heads, hn] -> [b, num_heads, sk, hn]
-        # Also apply attention mask here, since attention mask mechanism for Linformer
-        # is different from normal Transformer
-        value_layer = value_layer.view(output_size[0], output_size[1],
-                                   value_layer.size(0), -1)
-        assert attention_mask.size(0) == value_layer.size(0) and attention_mask.size(2) == value_layer.size(2), \
-            'Attention mask dimensions do not match value matrix dimensions'
-        value_layer = value_layer.masked_fill(attention_mask, 0.0)
         #
         # # change view [sk, b * num_heads, hn]
         value_layer = value_layer.contiguous().view(value_layer.size(2),
