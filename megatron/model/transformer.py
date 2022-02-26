@@ -664,6 +664,7 @@ class BigBirdRingParallelAttention(MegatronModule):
         self.block_size = args.block_size
         self.num_rand_blocks = args.num_rand_blocks
         self.sub_seq_length = args.sub_seq_length
+        self.seq_length = args.seq_length
 
         projection_size = args.kv_channels * args.num_attention_heads
         self.hidden_size_per_attention_head = mpu.divide(
@@ -717,7 +718,7 @@ class BigBirdRingParallelAttention(MegatronModule):
         if self.attention_type == AttnType.self_attn:
             # since using BigBird, check if subsequence can be broken down into blocks
             assert hidden_states.size(0) == self.sub_seq_length, 'args.sub_seq_length does not match data'
-            num_blocks = mpu.divide(self.sub_seq_length, self.block_size)
+            local_blocks = mpu.divide(self.sub_seq_length, self.block_size)
 
             # Attention heads [sq, b, h] --> [sq, b, (3 * hn * num_heads)]
             mixed_x_layer, _ = self.query_key_value(hidden_states)
@@ -754,38 +755,32 @@ class BigBirdRingParallelAttention(MegatronModule):
         # [b, num_heads, num_blocks, block_size, 3 * block_size]
         output_size = (query_layer.size(1),
                        query_layer.size(2),
-                       num_blocks,
+                       local_blocks,
                        self.block_size,
-                       3 * self.block_size)
+                       (3 + self.num_rand_blocks) * self.block_size)
 
         # [sq, b, num_heads, hn] -> [b * num_heads, num_blocks, block_size, hn]
-        blocked_query_matrix = query_layer.view(output_size[0] * output_size[1], output_size[2], 
+        query_layer = query_layer.view(output_size[0] * output_size[1], output_size[2], 
                                                     output_size[3], query_layer.size(3))
-        blocked_key_matrix = key_layer.view(output_size[0] * output_size[1], output_size[2], 
+        key_layer = key_layer.view(output_size[0] * output_size[1], output_size[2], 
                                                     output_size[3], key_layer.size(3))
-        blocked_value_matrix = value_layer.view(output_size[0] * output_size[1], output_size[2], 
+        value_layer = value_layer.view(output_size[0] * output_size[1], output_size[2], 
                                                     output_size[3], value_layer.size(3))
 
-        # ======================================================
+        # ==========================================================================
         # Raw sparse attention scores. 
-        # [b, num_heads, num_blocks, block_size, 3 * block_size]
-        # ======================================================
+        # [b, num_heads, num_blocks, block_size, (3 + num_rand_blocks) * block_size]
+        # ==========================================================================
 
-        # [sq, b, num_heads, hn] -> [sq, b * num_heads, hn]
-        query_layer = query_layer.view(output_size[2],
-                                       output_size[0] * output_size[1], -1)
-        # [sk, b, num_heads, hn] -> [sk, b * num_heads, hn]
-        key_layer = key_layer.view(key_layer.size(0),
-                                   output_size[0] * output_size[1], -1)
-
-        # [b, sq, sk]
-        attention_scores = mpu.RingQK.apply(
-            query_layer.transpose(0, 1).contiguous(), # [b * num_heads, sq, hn]
-            key_layer.transpose(0, 1).contiguous() # [b * num_heads, sk, hn]
+        # [b * num_heads, num_blocks, block_size, (3 + num_rand_blocks) * block_size]
+        attention_scores = mpu.BigBirdRingQK.apply(
+            query_layer.contiguous(), # [b * num_heads, num_blocks, block_size, hn]
+            key_layer.contiguous(), # [b * num_heads, num_blocks, block_size, hn]
+            rand_blocks
         )
         attention_scores /= self.norm_factor
 
-        # change view to [b, num_heads, sq, sk]
+        # change view to [b, num_heads, num_blocks, block_size, (3 + num_rand_blocks) * block_size]
         attention_scores = attention_scores.view(*output_size)
 
         # ===========================
