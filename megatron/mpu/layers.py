@@ -733,9 +733,6 @@ class BigBirdRingQK(torch.autograd.Function):
 
     @staticmethod
     def forward(ctx, sub_block_q, sub_block_k):
-        # save tensor for backward
-        ctx.save_for_backward(sub_block_q, sub_block_k)
-
         # Get arguments
         args = get_args()
         local_rank = get_tensor_model_parallel_rank()
@@ -753,21 +750,25 @@ class BigBirdRingQK(torch.autograd.Function):
             dtype=sub_block_q.dtype,
             device=torch.cuda.current_device()
         )
-
-        # computer local sparse QK^T sliding window attention
+        # create left and right key segments and first and last query block respectively
+        # this is needed to batch calculate the sliding window attention later
+        first_q_left_block = torch.empty(
+            args.micro_batch_size * args.num_attention_heads,
+            1,
+            args.block_size,
+            args.hidden_size // args.num_attention_heads,
+            dtype=sub_block_q.dtype,
+            device=torch.cuda.current_device()
+        )
+        last_q_right_block = torch.empty(
+            args.micro_batch_size * args.num_attention_heads,
+            1,
+            args.block_size,
+            args.hidden_size // args.num_attention_heads,
+            dtype=sub_block_q.dtype,
+            device=torch.cuda.current_device()
+        )
         sub_block_k = sub_block_k.transpose(2, 3)
-        diagonal_attention = torch.matmul(sub_block_q, sub_block_k)
-        attention_score[:, :, :, args.block_size:(2 * args.block_size)] = diagonal_attention
-        
-        # if more than one block, part of left and right attention blocks can be locally computed
-        # TODO (chai): Consider adding placeholders for missing blocks and batch multiplying
-        if local_blocks > 1:
-            attention_score[:, 1:, :, 0:args.block_size] = torch.matmul(
-                sub_block_q[:, 1:, :, :], sub_block_k[:, :-1, :, :]
-            )
-            attention_score[:, :-1, :, (2 * args.block_size):(3 * args.block_size)] = torch.matmul(
-                sub_block_q[:, :-1, :, :], sub_block_k[:, 1:, :, :]
-            )
 
         # left of first block and right of last block remaining, since not locally present
         # compute the remaining blocks using ring communication
@@ -777,13 +778,19 @@ class BigBirdRingQK(torch.autograd.Function):
             start_block, end_block = _calc_incoming_device_block_range(i, local_rank, local_world_size)
 
             if start_block == (cur_end_block + 1) % total_blocks:
-                attention_score[:, -1, :, (2 * args.block_size):(3 * args.block_size)] = torch.matmul(
-                    sub_block_q[:, -1, :, :], sub_block_k[:, 0, :, :]
-                )
+                last_q_right_block = sub_block_k[:, 0, :, :]
             if end_block == (cur_start_block - 1) % total_blocks:
-                attention_score[:, 0, :, 0:args.block_size] = torch.matmul(
-                    sub_block_q[:, 0, :, :], sub_block_k[:, -1, :, :]
-                )
+                first_q_left_block = sub_block_k[:, -1, :, :]
+        
+        sub_block_k = torch.cat((first_q_left_block, sub_block_k, last_q_right_block), dim=1)
+
+        # save tensor for backward
+        ctx.save_for_backward(sub_block_q, sub_block_k)
+
+        # computer local sparse QK^T sliding window attention
+        attention_score[:, :, :, 0:args.block_size] = torch.matmul(sub_block_q, sub_block_k[:, :-2, :, :])
+        attention_score[:, :, :, args.block_size:(2 * args.block_size)] = torch.matmul(sub_block_q, sub_block_k[:, 1:-1, :, :])
+        attention_score[:, :, :, (2 * args.block_size):(3 * args.block_size)] = torch.matmul(sub_block_q, sub_block_k[:, 2:, :, :])
         
         return attention_score
     
@@ -800,21 +807,22 @@ class BigBirdRingQK(torch.autograd.Function):
         local_blocks = args.sub_seq_length // args.block_size
         cur_start_block, cur_end_block = _calc_current_device_block_range(local_rank)
 
-        # calculate gradients which can be computed locally
-        grad_block_q = torch.matmul(grad_output, sub_block_k)
-        grad_block_k = torch.matmul(grad_output.transpose(2, 3), sub_block_q)
+        # calculate gradients of sub_block_q
+        grad_block_q = torch.matmul(grad_output[:, :, :, 0:args.block_size], sub_block_k[:, :-2, :, :])
+        grad_block_q += torch.matmul(grad_output[:, :, :, args.block_size:(2 * args.block_size)], sub_block_k[:, 1:-1, :, :])
+        grad_block_q += torch.matmul(grad_output[:, :, :, (2 * args.block_size):(3 * args.block_size)], sub_block_k[:, 2:, :, :])
+        grad_block_q /= 3
+        
+        # calculate gradient of sub_block_k
+        grad_block_k = torch.matmul(
+            grad_output[:, :, :, args.block_size:(2 * args.block_size)].transpose(2, 3), 
+            sub_block_q
+        )
 
         # if more than one block, part of left and right attention blocks can be locally computed
-        # TODO (chai): Consider adding placeholders for missing blocks and batch multiplying
         if local_blocks > 1:
-            grad_block_q[:, 1:, :, :] += torch.matmul(
-                grad_output[:, 1:, :, 0:args.block_size], sub_block_k[:, :-1, :, :]
-            )
             grad_block_k[:, :-1, :, :] += torch.matmul(
                 grad_output[:, 1:, :, 0:args.block_size].transpose(2, 3), sub_block_q[:, 1:, :, :]
-            )
-            grad_block_q[:, :-1, :, :] += torch.matmul(
-                grad_output[:, :-1, :, (2 * args.block_size):(3 * args.block_size)], sub_block_k[:, 1:, :, :]
             )
             grad_block_k[:, 1:, :, :] += torch.matmul(
                 grad_output[:, :-1, :, (2 * args.block_size):(3 * args.block_size)].transpose(2, 3), sub_block_q[:, :-1, :, :]
@@ -828,21 +836,14 @@ class BigBirdRingQK(torch.autograd.Function):
             grad_output[:, -1, :, (2 * args.block_size):(3 * args.block_size)].transpose(2, 3), sub_block_q[:, -1, :, :]
         )
         for i in range(local_world_size - 1):
-            sub_block_k = ring_forward(sub_block_k)
             first_q_block_grad_k = ring_forward(first_q_block_grad_k)
             last_q_block_grad_k = ring_forward(last_q_block_grad_k)
 
             start_block, end_block = _calc_incoming_device_block_range(i, local_rank, local_world_size)
 
             if start_block == (cur_end_block + 1) % total_blocks:
-                grad_block_q[:, -1, :, :] += torch.matmul(
-                    grad_output[:, -1, :, (2 * args.block_size):(3 * args.block_size)], sub_block_k[:, 0, :, :]
-                )
                 grad_block_k[:, -1, :, :] += first_q_block_grad_k
             if end_block == (cur_start_block - 1) % total_blocks:
-                grad_block_q[:, 0, :, :] += torch.matmul(
-                    grad_output[:, 0, :, 0:args.block_size], sub_block_k[:, -1, :, :]
-                )
                 grad_block_k[:, 0, :, :] += last_q_block_grad_k      
 
         # divide by 3 because in BigBird-ITC, sliding window attention is 3 blocks per query/key block
