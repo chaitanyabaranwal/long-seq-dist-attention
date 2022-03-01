@@ -752,7 +752,6 @@ class BigBirdRingParallelAttention(MegatronModule):
         # [b, num_heads, local_blocks, block_size, h]
         # =========================================
 
-        # [b, num_heads, local_blocks, block_size, 3 * block_size]
         first_product_size = (
             query_layer.size(1),
             query_layer.size(2),
@@ -767,30 +766,32 @@ class BigBirdRingParallelAttention(MegatronModule):
         )
 
         # [sq, b, num_heads, hn] -> [b * num_heads, local_blocks, block_size, hn]
-        query_layer = query_layer.view(inner_product_size[0] * inner_product_size[1], inner_product_size[2], 
-                                                    inner_product_size[3], query_layer.size(3))
-        key_layer = key_layer.view(inner_product_size[0] * inner_product_size[1], inner_product_size[2], 
-                                                    inner_product_size[3], key_layer.size(3))
-        value_layer = value_layer.view(inner_product_size[0] * inner_product_size[1], inner_product_size[2], 
-                                                    inner_product_size[3], value_layer.size(3))
+        query_layer = query_layer.view(inner_product_size[0] * inner_product_size[1], local_blocks, 
+                                                    self.block_size, query_layer.size(3))
+        key_layer = key_layer.view(inner_product_size[0] * inner_product_size[1], local_blocks, 
+                                                    self.block_size, key_layer.size(3))
 
         # =========================================================================
         # Raw sparse attention scores.
         # First/last product: [b, num_heads, block_size, s]
-        # Innter product: [b, num_heads, local_blocks, block_size, 5 * block_size]
+        # Innter product: [b, num_heads, local_blocks * block_size, 5 * block_size]
         # =========================================================================
 
         (first_product, inner_product, last_product) = mpu.BigBirdRingQK.apply(
             query_layer.contiguous(), # [b * num_heads, local_blocks, block_size, hn]
             key_layer.contiguous() # [b * num_heads, local_blocks, block_size, hn]
         )
-        first_product /= self.norm_factor
+        if first_product:
+            first_product /= self.norm_factor
         inner_product /= self.norm_factor
-        second_last_product /= self.norm_factor
+        if last_product:
+            last_product /= self.norm_factor
 
         # change view to [b, num_heads, *, *]
-        first_product = first_product.view(*first_product_size)
-        last_product = last_product.view(*first_product_size)
+        if first_product:
+            first_product = first_product.view(*first_product_size)
+        if last_product:
+            last_product = last_product.view(*first_product_size)
         inner_product = inner_product.view(*inner_product_size)
 
         # =========================================================
@@ -803,8 +804,11 @@ class BigBirdRingParallelAttention(MegatronModule):
             self.block_size,
             self.seq_length
         ) if first_product else None
-        last_product_mask = attention_mask[:, :, ((local_blocks - 1) * self.block_size):(local_blocks * self.block_size)].view_as(
-            first_product_mask
+        last_product_mask = attention_mask[:, :, ((local_blocks - 1) * self.block_size):(local_blocks * self.block_size)].view(
+            attention_mask.size(0),
+            attention_mask.size(1),
+            self.block_size,
+            self.seq_length
         ) if last_product else None
         attention_mask = self.big_bird_attn_mask(attention_mask, local_blocks, self.block_size)
         attention_mask = attention_mask.view_as(inner_product)
@@ -829,31 +833,48 @@ class BigBirdRingParallelAttention(MegatronModule):
                 last_product = self.attention_dropout(last_product)
             inner_product = self.attention_dropout(inner_product)
 
-        # =========================
-        # Context layer. [sq, b, hp]
-        # =========================
+        # ============================================================
+        # Context layer. [b, num_heads, local_blocks * block_size, hn]
+        # ============================================================
 
-        # value_layer -> context layer.
-        # [sk, b, num_heads, hn] --> [b, num_heads, sq, hn]
+        output_size = (
+            value_layer.size(1),
+            value_layer.size(2),
+            local_blocks * self.block_size,
+            value_layer.size(3)
+        )
 
-        # context layer shape: [b, num_heads, sq, hn]
-        output_size = (value_layer.size(1),
-                       value_layer.size(2),
-                       query_layer.size(0),
-                       value_layer.size(3))
-        #
-        # # change view [sk, b * num_heads, hn]
-        value_layer = value_layer.contiguous().view(value_layer.size(0),
-                                       output_size[0] * output_size[1], -1)
+        # [sq, b, num_heads, hn] -> [b * num_heads, local_blocks, block_size, hn]
+        value_layer = value_layer.view(output_size[0] * output_size[1], local_blocks,
+                                            self.block_size, output_size[3])
 
-        # # change view [b * num_heads, sq, sk]
-        attention_probs = attention_probs.view(attention_probs.size(0) * attention_probs.size(1),
-                                               attention_probs.size(2),
-                                               attention_probs.size(3))
+        # change view of attention scores [b * num_heads, blocks, block_size, block_size]
+        if first_product:
+            first_product = first_product.view(
+                first_product.size(0) * first_product.size(1),
+                self.seq_length // self.block_size,
+                first_product.size(2),
+                first_product.size(2)
+            )
+        if last_product:
+            last_product = last_product.view(
+                last_product.size(0) * last_product.size(1),
+                self.seq_length // self.block_size,
+                last_product.size(2),
+                last_product.size(2)
+            )
+        inner_product = inner_product.view(
+            inner_product.size(0) * inner_product.size(1),
+            local_blocks,
+            self.block_size,
+            inner_product.size(3)
+        )
 
-        # matmul: [b*num_heads, sq, hn]
-        # context_layer = torch.bmm(attention_probs, value_layer.transpose(0, 1))
-        context_layer = mpu.RingAV.apply(attention_probs, value_layer.transpose(0, 1).contiguous())
+        # matmul: [b * num_heads, local_blocks, block_size, hn]
+        context_layer = mpu.BigBirdRingAV.apply(
+            first_product, inner_product, last_product,
+            value_layer.contiguous()
+        )
 
         # # change view [b, num_heads, sq, hn]
         context_layer = context_layer.view(*output_size)
