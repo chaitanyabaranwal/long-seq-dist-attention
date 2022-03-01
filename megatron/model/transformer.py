@@ -756,15 +756,13 @@ class BigBirdRingParallelAttention(MegatronModule):
         first_product_size = (
             query_layer.size(1),
             query_layer.size(2),
-            args.seq_length // args.block_size,
             self.block_size,
-            self.block_size
+            self.seq_length
         )
         inner_product_size = (
             query_layer.size(1),
             query_layer.size(2),
-            local_blocks,
-            self.block_size,
+            local_blocks * self.block_size,
             5 * self.block_size
         )
 
@@ -778,12 +776,10 @@ class BigBirdRingParallelAttention(MegatronModule):
 
         # =========================================================================
         # Raw sparse attention scores.
-        # First/last product: [b, num_heads, 1, block_size, s]
-        # Second/second-last product: [b, num_heads, 1, block_size, 4 * block_size]
-        # Innter product: [b, num_heads, local_blocks, block_size, 5r * block_size]
+        # First/last product: [b, num_heads, block_size, s]
+        # Innter product: [b, num_heads, local_blocks, block_size, 5 * block_size]
         # =========================================================================
 
-        # TODO (chai): since inner_product contains first, second, last and second last bands, add a mask there if applicable
         (first_product, inner_product, last_product) = mpu.BigBirdRingQK.apply(
             query_layer.contiguous(), # [b * num_heads, local_blocks, block_size, hn]
             key_layer.contiguous() # [b * num_heads, local_blocks, block_size, hn]
@@ -792,23 +788,46 @@ class BigBirdRingParallelAttention(MegatronModule):
         inner_product /= self.norm_factor
         second_last_product /= self.norm_factor
 
-        # change view to [b, num_heads, *, *, *]
+        # change view to [b, num_heads, *, *]
         first_product = first_product.view(*first_product_size)
         last_product = last_product.view(*first_product_size)
         inner_product = inner_product.view(*inner_product_size)
+
+        # =========================================================
+        # Create attention mask the different attention components.
+        # =========================================================
+
+        first_product_mask = attention_mask[:, :, 0:self.block_size].view(
+            attention_mask.size(0),
+            attention_mask.size(1),
+            self.block_size,
+            self.seq_length
+        ) if first_product else None
+        last_product_mask = attention_mask[:, :, ((local_blocks - 1) * self.block_size):(local_blocks * self.block_size)].view_as(
+            first_product_mask
+        ) if last_product else None
+        attention_mask = self.big_bird_attn_mask(attention_mask, local_blocks, self.block_size)
+        attention_mask = attention_mask.view_as(inner_product)
 
         # ===========================
         # Attention probs and dropout
         # ===========================
 
         # attention scores and attention mask [b, num_heads, sq, sk]
-        attention_probs = self.scale_mask_softmax(attention_scores,
-                                                  attention_mask)
+        if first_product:
+            first_product = self.scale_mask_softmax(first_product, first_product_mask)
+        if last_product:
+            last_product = self.scale_mask_softmax(last_product, last_product_mask)
+        inner_product = self.scale_mask_softmax(inner_product, attention_mask)
 
         # This is actually dropping out entire tokens to attend to, which might
         # seem a bit unusual, but is taken from the original Transformer paper.
         with mpu.get_cuda_rng_tracker().fork():
-            attention_probs = self.attention_dropout(attention_probs)
+            if first_product:
+                first_product = self.attention_dropout(first_product)
+            if last_product:
+                last_product = self.attention_dropout(last_product)
+            inner_product = self.attention_dropout(inner_product)
 
         # =========================
         # Context layer. [sq, b, hp]
@@ -857,7 +876,28 @@ class BigBirdRingParallelAttention(MegatronModule):
             output = [output, present]
 
         return output, bias
+    
+    def get_attention_mask(self, attention_mask, local_blocks, block_size):
+        big_bird_attn_mask = torch.empty(
+            attention_mask.size(0),
+            attention_mask.size(1),
+            attention_mask.size(2),
+            5 * block_size,
+            dtype=attention_mask.dtype,
+            device=torch.cuda.current_device()
+        )
+        big_bird_attn_mask.fill_(False)
 
+        # fill global attention mask
+        big_bird_attn_mask[:, :, :, (3 * block_size):(4 * block_size)] = attention_mask[:, :, :, 0:block_size]
+        big_bird_attn_mask[:, :, :, (4 * block_size):(5 * block_size)] = attention_mask[:, :, :, ((total_blocks - 1) * block_size):(total_blocks * block_size)]
+
+        # fill sliding windoe attention mask
+        for i in range(local_blocks):
+            big_bird_attn_mask[:, :, (i * block_size):((i + 1) * block_size), :(3 * block_size)] =
+                attention_mask[:, :, (i * block_size):((i + 1) * block_size), ((i - 1) * block_size):((i + 2) * block_size)]
+
+        return big_bird_attn_mask
 
 ####################################
 # NOTE: for RingParallelAttention  #

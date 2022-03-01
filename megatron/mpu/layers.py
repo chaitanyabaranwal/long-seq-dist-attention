@@ -758,9 +758,9 @@ class BigBirdRingQK(torch.autograd.Function):
         # create local segment of attention scores
         first_product = torch.empty(
             args.micro_batch_size * args.num_attention_heads,
-            1,
+            total_blocks,
             args.block_size,
-            args.seq_length,
+            args.block_size,
             dtype=sub_block_q.dtype,
             device=torch.cuda.current_device()    
         ) if cur_start_block <= 0 <= cur_end_block else None
@@ -845,6 +845,23 @@ class BigBirdRingQK(torch.autograd.Function):
         inner_product[:, :, :, 0:args.block_size] = torch.matmul(sub_block_q, sub_block_k[:, :-2])
         inner_product[:, :, :, args.block_size:(2 * args.block_size)] = torch.matmul(sub_block_q, sub_block_k[:, 1:-1])
         inner_product[:, :, :, (2 * args.block_size):(3 * args.block_size)] = torch.matmul(sub_block_q, sub_block_k[:, 2:])
+
+        # apply mask to sliding window if first or second (or last or second last) block present
+        inner_block_range = _calc_current_device_inner_product_blocks(local_rank, total_blocks)
+        if first_product and cur_start_block <= 1 <= cur_end_block:
+            inner_product[:, 0].fill_(-10000.0)
+            inner_product[:, 1, :, (3 * args.block_size):(4 * args.block_size)].fill_(-10000.0)
+        elif first_product:
+            inner_product[:, 0].fill_(-10000.0)
+        elif cur_start_block <= 1 <= cur_end_block:
+            inner_product[:, 0, :, (3 * args.block_size):(4 * args.block_size)].fill_(-10000.0)
+        if last_product and cur_start_block <= total_blocks - 2 <= cur_end_block:
+            inner_product[:, -1].fill_(-10000.0)
+            inner_product[:, -2, :, (4 * args.block_size):(5 * args.block_size)].fill_(-10000.0)
+        elif last_product:
+            inner_product[:, -1].fill_(-10000.0)
+        elif cur_start_block <= total_blocks - 2 <= cur_end_block:
+            inner_product[:, -1, :, (4 * args.block_size):(5 * args.block_size)].fill_(-10000.0)
 
         # return the first product, inner product, and last product
         return (first_product, inner_product, last_product)
@@ -1006,3 +1023,5 @@ class BigBirdRingQK(torch.autograd.Function):
             grad_block_k[:, inner_block_range[0]:(inner_block_range[1] + 1)] /= 5
 
         return grad_block_q, grad_block_k
+
+
