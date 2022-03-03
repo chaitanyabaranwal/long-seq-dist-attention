@@ -94,9 +94,9 @@ class LinformerRingAV(torch.autograd.Function):
 
 def check_linformer_ring_qk(rank, world_size):
     # create master tensors
-    q = torch.rand(batch_size*num_heads, seq_length, attention_head_size, dtype=torch.float16).cuda()
+    q = torch.rand(batch_size*num_heads, seq_length, attention_head_size, dtype=torch.float64).cuda()
     dist.broadcast(q, src=0)
-    sub_k = torch.rand(batch_size*num_heads, attention_head_size, linformer_k, dtype=torch.float16).cuda()
+    sub_k = torch.rand(batch_size*num_heads, attention_head_size, linformer_k, dtype=torch.float64).cuda()
     k = sub_k.clone().detach()
     dist.all_reduce(k)
 
@@ -152,9 +152,9 @@ def check_linformer_ring_av(rank, world_size):
     linformer_k = 32
 
     # create master tensors
-    a = torch.rand(batch_size*num_heads, seq_length, linformer_k, dtype=torch.float16).cuda()
+    a = torch.rand(batch_size*num_heads, seq_length, linformer_k, dtype=torch.float64).cuda()
     dist.broadcast(a, src=0)
-    sub_v = torch.rand(batch_size*num_heads, linformer_k, attention_head_size, dtype=torch.float16).cuda()
+    sub_v = torch.rand(batch_size*num_heads, linformer_k, attention_head_size, dtype=torch.float64).cuda()
     v = sub_v.clone().detach()
     dist.all_reduce(v)
 
