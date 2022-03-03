@@ -620,8 +620,8 @@ def check_bigbird_ring_qk(rank, world_size):
     global seq_length, sub_seq_length, block_size, batch_size, num_heads, hidden_size
 
     # create master tensors
-    q = torch.rand(batch_size*num_heads, seq_length // block_size, block_size, hidden_size, dtype=torch.float16).cuda()
-    k = torch.rand(batch_size*num_heads, seq_length // block_size, block_size, hidden_size, dtype=torch.float16).cuda()
+    q = torch.rand(batch_size*num_heads, seq_length // block_size, block_size, hidden_size, dtype=torch.float64).cuda()
+    k = torch.rand(batch_size*num_heads, seq_length // block_size, block_size, hidden_size, dtype=torch.float64).cuda()
     dist.broadcast(q, src=0)
     dist.broadcast(k, src=0)
 
@@ -688,14 +688,14 @@ def check_bigbird_ring_av(rank, world_size):
     global seq_length, sub_seq_length, block_size, batch_size, num_heads, hidden_size
 
     # create master tensors
-    first_product = torch.rand(batch_size*num_heads, seq_length // block_size, block_size, block_size, dtype=torch.float16).cuda()
-    inner_product = torch.rand(batch_size*num_heads, seq_length // block_size, block_size, 5 * block_size, dtype=torch.float16).cuda()
+    first_product = torch.rand(batch_size*num_heads, seq_length // block_size, block_size, block_size, dtype=torch.float64).cuda()
+    inner_product = torch.rand(batch_size*num_heads, seq_length // block_size, block_size, 5 * block_size, dtype=torch.float64).cuda()
     inner_product[:, 0].fill_(0.0)
     inner_product[:, -1].fill_(0.0)
     inner_product[:, 1, :, (3 * block_size):(4 * block_size)].fill_(0.0)
     inner_product[:, -2, :, (4 * block_size):(5 * block_size)].fill_(0.0)
-    last_product = torch.rand(batch_size*num_heads, seq_length // block_size, block_size, block_size, dtype=torch.float16).cuda()
-    v = torch.rand(batch_size*num_heads, seq_length // block_size, block_size, hidden_size, dtype=torch.float16).cuda()
+    last_product = torch.rand(batch_size*num_heads, seq_length // block_size, block_size, block_size, dtype=torch.float64).cuda()
+    v = torch.rand(batch_size*num_heads, seq_length // block_size, block_size, hidden_size, dtype=torch.float64).cuda()
     dist.broadcast(first_product, src=0)
     dist.broadcast(inner_product, src=0)
     dist.broadcast(last_product, src=0)
@@ -752,7 +752,7 @@ def check_bigbird_ring_av(rank, world_size):
     
     # check master and distributed output scores
     assert torch.allclose(sub_out, sub_master_out, rtol=1e-5, atol=1e-2), \
-        f'output score does not match {torch.eq(sub_out, sub_master_out)}'
+        'output score does not match'
     
     # # run master backward
     # a.retain_grad()

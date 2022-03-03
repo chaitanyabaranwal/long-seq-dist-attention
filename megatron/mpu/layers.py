@@ -1043,6 +1043,7 @@ class BigBirdRingAV(torch.autograd.Function):
         # create local segment of attention scores
         first_context = torch.zeros(
             args.micro_batch_size * args.num_attention_heads,
+            1,
             args.block_size,
             args.hidden_size // args.num_attention_heads,
             dtype=first_product.dtype,
@@ -1058,6 +1059,7 @@ class BigBirdRingAV(torch.autograd.Function):
         )
         last_context = torch.zeros(
             args.micro_batch_size * args.num_attention_heads,
+            1,
             args.block_size,
             args.hidden_size // args.num_attention_heads,
             dtype=last_product.dtype,
@@ -1068,6 +1070,7 @@ class BigBirdRingAV(torch.autograd.Function):
         # this is needed to batch calculate the sliding window output later
         first_a_left_block = torch.empty(
             args.micro_batch_size * args.num_attention_heads,
+            1,
             args.block_size,
             args.hidden_size // args.num_attention_heads,
             dtype=sub_block_v.dtype,
@@ -1077,41 +1080,40 @@ class BigBirdRingAV(torch.autograd.Function):
 
         # first and last attention block attend to all value blocks
         if first_context is not None:
-            first_context += torch.sum(torch.matmul(first_product[:, cur_start_block:(cur_end_block + 1)], sub_block_v), dim=1)
-            inner_context += torch.matmul(inner_product[:, :, :, (3 * args.block_size):(4 * args.block_size)], sub_block_v[:, 0])
+            first_context += torch.sum(torch.matmul(first_product[:, cur_start_block:(cur_end_block + 1)], sub_block_v), dim=1, keepdims=True)
+            inner_context += torch.matmul(inner_product[:, :, :, (3 * args.block_size):(4 * args.block_size)], sub_block_v[:, 0:1])
         if last_context is not None:
-            last_context += torch.sum(torch.matmul(last_product[:, :, cur_start_block:(cur_end_block + 1)], sub_block_v), dim=1)
-            inner_context += torch.matmul(inner_product[:, :, :, (4 * args.block_size):(5 * args.block_size)], sub_block_v[:, -1])
+            last_context += torch.sum(torch.matmul(last_product[:, :, cur_start_block:(cur_end_block + 1)], sub_block_v), dim=1, keepdims=True)
+            inner_context += torch.matmul(inner_product[:, :, :, (4 * args.block_size):(5 * args.block_size)], sub_block_v[:, -1:])
         
         # left of first attention block and right of last block remaining, since not locally present
         # compute the remaining blocks using ring communication
         for i in range(local_world_size - 1):
             sub_block_v = ring_forward(sub_block_v)
-            start_idx, end_idx = _calc_incoming_device_range(i, local_rank, local_world_size)
             start_block, end_block = _calc_incoming_device_block_range(i, local_rank, local_world_size)
 
             # first and last blocks pay attention to all blocks
             if first_context is not None:
-                first_context += torch.matmul(first_product[:, start_block:(end_block + 1)], sub_block_v)
+                first_context += torch.sum(torch.matmul(first_product[:, start_block:(end_block + 1)], sub_block_v), dim=1, keepdims=True)
             if last_context is not None:
-                last_context += torch.matmul(last_product[:, start_block:(end_block + 1)], sub_block_v)
+                last_context += torch.sum(torch.matmul(last_product[:, start_block:(end_block + 1)], sub_block_v), dim=1, keepdims=True)
             
             # first and last blocks get attention from all blocks
             if start_block == 0:
-                inner_context += torch.matmul(inner_product[:, :, :, (3 * args.block_size):(4 * args.block_size)], sub_block_v[:, 0])
+                inner_context += torch.matmul(inner_product[:, :, :, (3 * args.block_size):(4 * args.block_size)], sub_block_v[:, 0:1])
             if end_block == total_blocks - 1:
-                inner_context += torch.matmul(inner_product[:, :, :, (4 * args.block_size):(5 * args.block_size)], sub_block_v[:, -1])
+                inner_context += torch.matmul(inner_product[:, :, :, (4 * args.block_size):(5 * args.block_size)], sub_block_v[:, -1:])
             
             # gather any remaining value blocks needed for sliding window attention
             if start_block == (cur_end_block + 1) % total_blocks:
-                last_a_right_block = sub_block_v[:, 0]
+                last_a_right_block = sub_block_v[:, 0:1]
             if end_block == (cur_start_block - 1) % total_blocks:
-                first_a_left_block = sub_block_v[:, -1]
+                first_a_left_block = sub_block_v[:, -1:]
         
         # get back original block
         sub_block_v = ring_forward(sub_block_v)
         # concatenate any extra value blocks for sliding window attention
-        sub_block_v = torch.cat((first_a_left_block.unsqueeze(1), sub_block_v, last_a_right_block.unsqueeze(1)), dim=1)
+        sub_block_v = torch.cat((first_a_left_block, sub_block_v, last_a_right_block), dim=1)
 
         # save tensor for backward
         ctx.save_for_backward(first_product, inner_product, last_product, sub_block_v)
@@ -1125,11 +1127,11 @@ class BigBirdRingAV(torch.autograd.Function):
 
         # concatenatate accordingly
         if first_context is not None and last_context is not None:
-            context_layer = torch.cat((first_context.unsqueeze(1), inner_context[:, 1:-1], last_context.unsqueeze(1)), dim=1)
+            context_layer = torch.cat((first_context, inner_context[:, 1:-1], last_context), dim=1)
         elif first_context is not None:
-            context_layer = torch.cat((first_context.unsqueeze(1), inner_context[:, 1:]), dim=1)
+            context_layer = torch.cat((first_context, inner_context[:, 1:]), dim=1)
         elif last_context is not None:
-            context_layer = torch.cat((inner_context[:, :-1], last_context.unsqueeze(1)), dim=1)
+            context_layer = torch.cat((inner_context[:, :-1], last_context), dim=1)
         else:
             context_layer = inner_context
 
