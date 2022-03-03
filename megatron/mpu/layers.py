@@ -786,8 +786,8 @@ class BigBirdRingQK(torch.autograd.Function):
         first_q_left_block = torch.empty(
             args.micro_batch_size * args.num_attention_heads,
             1,
-            args.block_size,
             args.hidden_size // args.num_attention_heads,
+            args.block_size,
             dtype=sub_block_q.dtype,
             device=torch.cuda.current_device()
         )
@@ -851,9 +851,11 @@ class BigBirdRingQK(torch.autograd.Function):
         ctx.save_for_backward(sub_block_q, sub_block_k)
 
         # computer QK^T sliding window attention
-        inner_product[:, :, :, 0:args.block_size] = torch.matmul(sub_block_q, sub_block_k[:, :-2])
-        inner_product[:, :, :, args.block_size:(2 * args.block_size)] = torch.matmul(sub_block_q, sub_block_k[:, 1:-1])
-        inner_product[:, :, :, (2 * args.block_size):(3 * args.block_size)] = torch.matmul(sub_block_q, sub_block_k[:, 2:])
+        # TODO (chai): Consider breaking down into parts to save memory
+        inner_product[:, :, :, :(3 * args.block_size)] = torch.matmul(
+            sub_block_q, 
+            torch.cat((sub_block_k[:, :-2], sub_block_k[:, 1:-1], sub_block_k[:, 2:]), dim=3)
+        )
 
         # apply mask to sliding window if first or second (or last or second last) block present
         inner_block_range = _calc_current_device_inner_product_blocks(local_rank, total_blocks)
@@ -1115,9 +1117,11 @@ class BigBirdRingAV(torch.autograd.Function):
         ctx.save_for_backward(first_product, inner_product, last_product, sub_block_v)
 
         # compute AV sliding window attention
-        inner_context += torch.matmul(inner_product[:, :, :, 0:args.block_size], sub_block_v[:, :-2])
-        inner_context += torch.matmul(inner_product[:, :, :, args.block_size:(2 * args.block_size)], sub_block_v[:, 1:-1])
-        inner_context += torch.matmul(inner_product[:, :, :, (3 * args.block_size):(2 * args.block_size)], sub_block_v[:, 2:])
+        # TODO (chai): Consider breaking down into parts to save memory
+        inner_context += torch.matmul(
+            inner_product[:, :, :, :(3 * block_size)], 
+            torch.cat((sub_block_v[:, :-2], sub_block_v[:, 1:-1], sub_block_v[:, 2:]), dim=2)
+        )
 
         # concatenatate accordingly
         if first_context is not None and last_context is not None:

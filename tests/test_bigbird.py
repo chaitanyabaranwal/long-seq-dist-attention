@@ -138,8 +138,8 @@ class BigBirdRingQK(torch.autograd.Function):
         first_q_left_block = torch.empty(
             batch_size * num_heads,
             1,
-            block_size,
             hidden_size,
+            block_size,
             dtype=sub_block_q.dtype,
             device=torch.cuda.current_device()
         )
@@ -203,9 +203,11 @@ class BigBirdRingQK(torch.autograd.Function):
         ctx.save_for_backward(sub_block_q, sub_block_k)
 
         # computer QK^T sliding window attention
-        inner_product[:, :, :, 0:block_size] = torch.matmul(sub_block_q, sub_block_k[:, :-2])
-        inner_product[:, :, :, block_size:(2 * block_size)] = torch.matmul(sub_block_q, sub_block_k[:, 1:-1])
-        inner_product[:, :, :, (2 * block_size):(3 * block_size)] = torch.matmul(sub_block_q, sub_block_k[:, 2:])
+        # TODO (chai): Consider breaking down into parts to save memory
+        inner_product[:, :, :, :(3 * block_size)] = torch.matmul(
+            sub_block_q, 
+            torch.cat((sub_block_k[:, :-2], sub_block_k[:, 1:-1], sub_block_k[:, 2:]), dim=3)
+        )
 
         # apply mask to sliding window if first or second (or last or second last) block present
         inner_block_range = _calc_current_device_inner_product_blocks(local_rank, total_blocks)
@@ -438,7 +440,6 @@ class BigBirdRingAV(torch.autograd.Function):
         # compute the remaining blocks using ring communication
         for i in range(world_size - 1):
             sub_block_v = ring_forward(sub_block_v)
-            start_idx, end_idx = _calc_incoming_device_range(i, local_rank, world_size)
             start_block, end_block = _calc_incoming_device_block_range(i, local_rank, world_size)
 
             # first and last blocks pay attention to all blocks
@@ -468,9 +469,11 @@ class BigBirdRingAV(torch.autograd.Function):
         ctx.save_for_backward(first_product, inner_product, last_product, sub_block_v)
 
         # compute AV sliding window attention
-        inner_context += torch.matmul(inner_product[:, :, :, 0:block_size], sub_block_v[:, :-2])
-        inner_context += torch.matmul(inner_product[:, :, :, block_size:(2 * block_size)], sub_block_v[:, 1:-1])
-        inner_context += torch.matmul(inner_product[:, :, :, (2 * block_size):(3 * block_size)], sub_block_v[:, 2:])
+        # TODO (chai): Consider breaking down into parts to save memory
+        inner_context += torch.matmul(
+            inner_product[:, :, :, :(3 * block_size)], 
+            torch.cat((sub_block_v[:, :-2], sub_block_v[:, 1:-1], sub_block_v[:, 2:]), dim=2)
+        )
 
         # concatenatate accordingly
         if first_context is not None and last_context is not None:
@@ -642,14 +645,10 @@ def check_bigbird_ring_qk(rank, world_size):
     k = k.transpose(2, 3)
     master_first_product = torch.matmul(q[:, 0:1], k)
     master_last_product = torch.matmul(q[:, -1:], k)
-    master_inner_product = torch.cat(
-        (
-            torch.matmul(q, torch.roll(k, 1, 1)),
-            torch.matmul(q, k),
-            torch.matmul(q, torch.roll(k, -1, 1)),
-            torch.matmul(q, k[:, 0:1]),
-            torch.matmul(q, k[:, -1:])
-        ),
+    master_inner_product = torch.cat((
+        torch.matmul(q, torch.cat((torch.roll(k, 1, 1), k, torch.roll(k, -1, 1)), dim=3)),
+        torch.matmul(q, k[:, 0:1]),
+        torch.matmul(q, k[:, -1:])),
         dim=3
     )
     master_inner_product[:, 0].fill_(-10000.0)
@@ -731,16 +730,17 @@ def check_bigbird_ring_av(rank, world_size):
     sub_v.retain_grad()
 
     # compute master output scores
-    middle_out_1 = torch.matmul(inner_product[:, :, :, 0:block_size], torch.roll(v, 1, 1))
-    middle_out_2 = torch.matmul(inner_product[:, :, :, block_size:(2 * block_size)], v)
-    middle_out_3 = torch.matmul(inner_product[:, :, :, (2 * block_size):(3 * block_size)], torch.roll(v, -1, 1))
-    middle_out_4 = torch.matmul(inner_product[:, :, :, (3 * block_size):(4 * block_size)], v[:, 0:1])
-    middle_out_5 = torch.matmul(inner_product[:, :, :, (4 * block_size):(5 * block_size)], v[:, -1:])
+    middle_out = torch.matmul(
+        inner_product[:, 1:-1, :, :(3 * block_size)], 
+        torch.cat((v[:, 0:-2], v[:, 1:-1], v[:, 2:]), dim=2)
+    )
+    middle_out += torch.matmul(inner_product[:, 1:-1, :, (3 * block_size):(4 * block_size)], v[:, 0:1])
+    middle_out += torch.matmul(inner_product[:, 1:-1, :, (4 * block_size):(5 * block_size)], v[:, -1:])
     out = torch.cat(
         (
-            torch.sum(torch.matmul(first_product, v), dim=1).unsqueeze(1),
-            torch.sum(torch.stack((middle_out_1, middle_out_2, middle_out_3, middle_out_4, middle_out_5)), dim=0)[:, 1:-1],
-            torch.sum(torch.matmul(last_product, v), dim=1).unsqueeze(1)
+            torch.sum(torch.matmul(first_product, v), dim=1, keepdims=True),
+            middle_out,
+            torch.sum(torch.matmul(last_product, v), dim=1, keepdims=True)
         ),
         dim=1
     )
@@ -751,9 +751,8 @@ def check_bigbird_ring_av(rank, world_size):
     sub_master_out = out[:, start_block:(end_block + 1)]
     
     # check master and distributed output scores
-    print(f'Percentage diff: {torch.sum(torch.eq(sub_out, sub_master_out)).item()/sub_out.nelement()}')
     assert torch.allclose(sub_out, sub_master_out, rtol=1e-5, atol=1e-2), \
-        f'output score does not match {sub_out} {sub_master_out}'
+        f'output score does not match {torch.eq(sub_out, sub_master_out)}'
     
     # # run master backward
     # a.retain_grad()
