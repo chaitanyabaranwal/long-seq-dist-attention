@@ -781,16 +781,16 @@ class BigBirdRingParallelAttention(MegatronModule):
             query_layer.contiguous(), # [b * num_heads, local_blocks, block_size, hn]
             key_layer.contiguous() # [b * num_heads, local_blocks, block_size, hn]
         )
-        if first_product:
+        if first_product is not None:
             first_product /= self.norm_factor
         inner_product /= self.norm_factor
-        if last_product:
+        if last_product is not None:
             last_product /= self.norm_factor
 
         # change view to [b, num_heads, *, *]
-        if first_product:
+        if first_product is not None:
             first_product = first_product.view(*first_product_size)
-        if last_product:
+        if last_product is not None:
             last_product = last_product.view(*first_product_size)
         inner_product = inner_product.view(*inner_product_size)
 
@@ -818,18 +818,18 @@ class BigBirdRingParallelAttention(MegatronModule):
         # ===========================
 
         # attention scores and attention mask [b, num_heads, sq, sk]
-        if first_product:
+        if first_product is not None:
             first_product = self.scale_mask_softmax(first_product, first_product_mask)
-        if last_product:
+        if last_product is not None:
             last_product = self.scale_mask_softmax(last_product, last_product_mask)
         inner_product = self.scale_mask_softmax(inner_product, attention_mask)
 
         # This is actually dropping out entire tokens to attend to, which might
         # seem a bit unusual, but is taken from the original Transformer paper.
         with mpu.get_cuda_rng_tracker().fork():
-            if first_product:
+            if first_product is not None:
                 first_product = self.attention_dropout(first_product)
-            if last_product:
+            if last_product is not None:
                 last_product = self.attention_dropout(last_product)
             inner_product = self.attention_dropout(inner_product)
 
@@ -849,14 +849,14 @@ class BigBirdRingParallelAttention(MegatronModule):
                                             self.block_size, output_size[3])
 
         # change view of attention scores [b * num_heads, blocks, block_size, block_size]
-        if first_product:
+        if first_product is not None:
             first_product = first_product.view(
                 first_product.size(0) * first_product.size(1),
                 self.seq_length // self.block_size,
                 first_product.size(2),
                 first_product.size(2)
             )
-        if last_product:
+        if last_product is not None:
             last_product = last_product.view(
                 last_product.size(0) * last_product.size(1),
                 self.seq_length // self.block_size,
