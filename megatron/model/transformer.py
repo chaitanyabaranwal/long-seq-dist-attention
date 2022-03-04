@@ -777,7 +777,7 @@ class BigBirdRingParallelAttention(MegatronModule):
         # Innter product: [b, num_heads, local_blocks * block_size, 5 * block_size]
         # =========================================================================
 
-        (first_product, inner_product, last_product) = mpu.BigBirdRingQK.apply(
+        first_product, inner_product, last_product = mpu.BigBirdRingQK.apply(
             query_layer.contiguous(), # [b * num_heads, local_blocks, block_size, hn]
             key_layer.contiguous() # [b * num_heads, local_blocks, block_size, hn]
         )

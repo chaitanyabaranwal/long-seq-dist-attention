@@ -475,27 +475,29 @@ class BigBirdRingAV(torch.autograd.Function):
             first_product, 
             dtype=grad_output.dtype, 
             device=torch.cuda.current_device()
-        ) if first_product else None
+        ) if first_product is not None else None
         grad_last_product = torch.zeros_like(
             last_product, 
             dtype=grad_output.dtype, 
             device=torch.cuda.current_device()
-        ) if last_product else None
+        ) if last_product is not None else None
         grad_inner_product = torch.zeros_like(inner_product, dtype=grad_output.dtype, device=torch.cuda.current_device())
         grad_block_v = torch.zeros_like(sub_block_v[:, 1:-1], dtype=inner_product.dtype, device=torch.cuda.current_device())
 
         # calculate gradient for inner product
-        grad_inner_product[:, :, :, 0:block_size] += torch.matmul(grad_output, sub_block_v[:, :-2].transpose(2, 3))
-        grad_inner_product[:, :, :, block_size:(2 * block_size)] += torch.matmul(grad_output, sub_block_v[:, 1:-1].transpose(2, 3))
-        grad_inner_product[:, :, :, (2 * block_size):(3 * block_size)] += torch.matmul(grad_output, sub_block_v[:, :2].transpose(2, 3))
+        # TODO (chai): Consider breaking down into parts to save memory
+        grad_inner_product[:, :, :, :(3 * block_size)] += torch.matmul(
+            grad_output,
+            torch.cat((sub_block_v[:, :-2], sub_block_v[:, 1:-1], sub_block_v[:, 2:]), dim=2).transpose(2, 3)
+        )
 
         # compute gradients of first and last attention bands if applicable
         if grad_first_product is not None:
-            grad_first_product[:, cur_start_block:(cur_end_block + 1)] += torch.matmul(grad_output[:, 0], sub_block_v[:, 1:-1].transpose(2, 3))
-            grad_inner_product[:, :, :, (3 * block_size):(4 * block_size)] += torch.matmul(grad_output, sub_block_v[:, 1].transpose(2, 3))
+            grad_first_product[:, cur_start_block:(cur_end_block + 1)] += torch.matmul(grad_output[:, 0:1], sub_block_v[:, 1:-1].transpose(2, 3))
+            grad_inner_product[:, :, :, (3 * block_size):(4 * block_size)] += torch.matmul(grad_output, sub_block_v[:, 1:2].transpose(2, 3))
         if grad_last_product is not None:
-            grad_last_product[:, cur_start_block:(cur_end_block + 1)] += torch.matmul(grad_output[:, -1], sub_block_v[:, 1:-1].transpose(2, 3))
-            grad_inner_product[:, :, :, (4 * block_size):(5 * block_size)] += torch.matmul(grad_output, sub_block_v[:, -1].transpose(2, 3))
+            grad_last_product[:, cur_start_block:(cur_end_block + 1)] += torch.matmul(grad_output[:, -1:], sub_block_v[:, 1:-1].transpose(2, 3))
+            grad_inner_product[:, :, :, (4 * block_size):(5 * block_size)] += torch.matmul(grad_output, sub_block_v[:, -2:-1].transpose(2, 3))
 
         # calculate gradient of sub_block_v due to sliding window attention
         grad_block_v += torch.matmul(inner_product[:, :, :, block_size:(2 * block_size)].transpose(2, 3), grad_output)
@@ -505,21 +507,21 @@ class BigBirdRingAV(torch.autograd.Function):
             grad_block_v[:, 1:] += torch.matmul(inner_product[:, :-1, :, (2 * block_size):(3 * block_size)].transpose(2, 3), grad_output[:, :-1])
         
         # use ring communication to calculate remaining parts of gradient
-        first_a_block_grad_v = torch.matmul(inner_product[:, 0, :, 0:block_size].transpose(2, 3), grad_output[:, 0])
-        last_a_block_grad_v = torch.matmul(inner_product[:, -1, :, (2 * block_size):(3 * block_size)].transpose(2, 3), grad_output[:, -1])
+        first_a_block_grad_v = torch.matmul(inner_product[:, 0, :, 0:block_size].transpose(1, 2), grad_output[:, 0])
+        last_a_block_grad_v = torch.matmul(inner_product[:, -1, :, (2 * block_size):(3 * block_size)].transpose(1, 2), grad_output[:, -1])
         for i in range(world_size - 1):
             sub_block_v = ring_forward(sub_block_v)
             start_block, end_block = _calc_incoming_device_block_range(i, local_rank, world_size)
 
             if grad_first_product is not None:
-                grad_first_product[:, start_block:(end_block + 1)] += torch.matmul(grad_output[:, 0], sub_block_v[:, 1:-1].transpose(2, 3))
+                grad_first_product[:, start_block:(end_block + 1)] += torch.matmul(grad_output[:, 0:1], sub_block_v[:, 1:-1].transpose(2, 3))
             if grad_last_product is not None:
-                grad_last_product[:, start_block:(end_block + 1)] += torch.matmul(grad_output[:, -1], sub_block_v[:, 1:-1].transpose(2, 3))
+                grad_last_product[:, start_block:(end_block + 1)] += torch.matmul(grad_output[:, -1:], sub_block_v[:, 1:-1].transpose(2, 3))
             
             if start_block == 0:
-                grad_inner_product[:, :, :, (3 * block_size):(4 * block_size)] += torch.matmul(grad_output, sub_block_v[:, 1].transpose(2, 3))
+                grad_inner_product[:, :, :, (3 * block_size):(4 * block_size)] += torch.matmul(grad_output, sub_block_v[:, 1:2].transpose(2, 3))
             if end_block == total_blocks - 1:
-                grad_inner_product[:, :, :, (4 * block_size):(5 * block_size)] += torch.matmul(grad_output, sub_block_v[:, -1].transpose(2, 3))  
+                grad_inner_product[:, :, :, (4 * block_size):(5 * block_size)] += torch.matmul(grad_output, sub_block_v[:, -2:-1].transpose(2, 3))  
 
             if start_block == (cur_end_block + 1) % total_blocks:
                 grad_block_v[:, -1] += first_a_block_grad_v
@@ -537,10 +539,10 @@ class BigBirdRingAV(torch.autograd.Function):
             device=torch.cuda.current_device()
         )
         if grad_first_product is not None:
-            grad_block_v_from_global += torch.matmul(grad_first_product.transpose(2, 3), grad_output[:, 0])
+            grad_block_v_from_global += torch.matmul(grad_first_product.transpose(2, 3), grad_output[:, 0:1])
         if grad_last_product is not None:
-            grad_block_v_from_global += torch.matmul(grad_last_product.transpose(2, 3), grad_output[:, -1])
-        torch.distributed.all_reduce(grad_block_v_from_global, group=get_tensor_model_parallel_group())
+            grad_block_v_from_global += torch.matmul(grad_last_product.transpose(2, 3), grad_output[:, -1:])
+        torch.distributed.all_reduce(grad_block_v_from_global)
         grad_block_v_from_global = grad_block_v_from_global[:, cur_start_block:(cur_end_block + 1)]
         grad_block_v += grad_block_v_from_global
 
@@ -549,14 +551,14 @@ class BigBirdRingAV(torch.autograd.Function):
             inner_product[:, :, :, (3 * block_size):(4 * block_size)].transpose(2, 3), grad_output
         )
         grad_block_v_from_global = torch.sum(grad_block_v_from_global, dim=1)
-        torch.distributed.reduce(grad_block_v_from_global, _calc_device_with_first_block(), group=get_tensor_model_parallel_group())
+        torch.distributed.reduce(grad_block_v_from_global, _calc_device_with_first_block())
         if cur_start_block == 0:
             grad_block_v[:, 0] += grad_block_v_from_global
         grad_block_v_from_global = torch.matmul(
             inner_product[:, :, :, (4 * block_size):(5 * block_size)].transpose(2, 3), grad_output
         )
         grad_block_v_from_global = torch.sum(grad_block_v_from_global, dim=1)
-        torch.distributed.reduce(grad_block_v_from_global, _calc_device_with_last_block(), group=get_tensor_model_parallel_group())
+        torch.distributed.reduce(grad_block_v_from_global, _calc_device_with_last_block())
         if cur_end_block == total_blocks - 1:
             grad_block_v[:, -1] += grad_block_v_from_global
 
@@ -565,25 +567,17 @@ class BigBirdRingAV(torch.autograd.Function):
         if grad_first_product is not None and cur_start_block <= 1 <= cur_end_block:
             grad_inner_product[:, 0].fill_(0.0)
             grad_inner_product[:, 1, :, (3 * block_size):(4 * block_size)].fill_(0.0)
-            grad_block_v[:, 0] /= world_size
-            grad_block_v[:, 1] /= 4
         elif grad_first_product is not None:
             grad_inner_product[:, 0].fill_(0.0)
-            grad_block_v[:, 0] /= world_size
         elif cur_start_block <= 1 <= cur_end_block:
             grad_inner_product[:, 0, :, (3 * block_size):(4 * block_size)].fill_(0.0)
-            grad_block_v[:, 0] /= 4
         if grad_last_product is not None and cur_start_block <= total_blocks - 2 <= cur_end_block:
             grad_inner_product[:, -1].fill_(0.0)
             grad_inner_product[:, -2, :, (4 * block_size):(5 * block_size)].fill_(0.0)
-            grad_block_v[:, -1] /= world_size
-            grad_block_v[:, -2] /= 4
         elif last_product is not None:
             grad_inner_product[:, -1].fill_(0.0)
-            grad_block_v[:, -1] /= world_size
         elif cur_start_block <= total_blocks - 2 <= cur_end_block:
             grad_inner_product[:, -1, :, (4 * block_size):(5 * block_size)].fill_(0.0)
-            grad_block_v[:, -1] /= 4
 
         return grad_first_product, grad_inner_product, grad_last_product, grad_block_v
 
@@ -754,17 +748,31 @@ def check_bigbird_ring_av(rank, world_size):
         'output score does not match'
     
     # # run master backward
-    # a.retain_grad()
-    # a.mean().backward()
+    out.retain_grad()
+    out.mean().backward()
 
-    # # run distributed backward
-    # partial_master_a_grad = a.grad[:, rank*sub_seq_length:(rank+1)*sub_seq_length]
-    # torch.autograd.backward(sub_a, partial_master_a_grad)
+    # run distributed backward
+    partial_master_out_grad = out.grad[:, start_block:(end_block + 1)]
+    torch.autograd.backward(sub_out, partial_master_out_grad)
+    inner_product.grad[:, 0].fill_(0.0)
+    inner_product.grad[:, -1].fill_(0.0)
+    inner_product.grad[:, 1, :, (3 * block_size):(4 * block_size)].fill_(0.0)
+    inner_product.grad[:, -2, :, (4 * block_size):(5 * block_size)].fill_(0.0)
 
-    # # check master and distributed grads
-    # partial_master_q_grad = q.grad[:, rank*sub_seq_length:(rank+1)*sub_seq_length]
-    # assert torch.allclose(sub_q.grad, partial_master_q_grad, rtol=1e-5, atol=1e-2), \
-    #     'attention score cannot match'
+    # check master and distributed grads
+    if sub_first_product is not None:
+        assert torch.allclose(sub_first_product.grad, first_product.grad, rtol=1e-5, atol=1e-2), \
+            'first product gradient does not match'
+    if sub_last_product is not None:
+        assert torch.allclose(sub_last_product.grad, last_product.grad, rtol=1e-5, atol=1e-2), \
+            'last product gradient does not match'
+    partial_master_inner_product_grad = inner_product.grad[:, start_block:(end_block + 1)]
+    assert torch.allclose(sub_inner_product.grad, partial_master_inner_product_grad, rtol=1e-5, atol=1e-2), \
+        'inner product gradient does not match'
+    
+    partial_master_v_grad = v.grad[:, start_block:(end_block + 1)]
+    assert torch.allclose(sub_v.grad, partial_master_v_grad, rtol=1e-5, atol=1e-2), \
+        'partial V gradient does not match'
 
 def run_test(rank, world_size):
     os.environ['MASTER_ADDR'] = 'localhost'
@@ -788,9 +796,9 @@ def run_test(rank, world_size):
     dist.barrier()
 
     # start ring-AV test
-    # print(f'Rank {rank}: Starting BigBird-Ring-AV test...')
-    # check_bigbird_ring_av(rank, world_size)
-    # print(f'Rank {rank}: Finished BigBird-Ring-AV test...')
+    print(f'Rank {rank}: Starting BigBird-Ring-AV test...')
+    check_bigbird_ring_av(rank, world_size)
+    print(f'Rank {rank}: Finished BigBird-Ring-AV test...')
 
     torch.cuda.empty_cache()
 
