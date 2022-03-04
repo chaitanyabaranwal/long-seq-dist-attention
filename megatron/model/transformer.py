@@ -18,6 +18,7 @@ import math
 import torch
 import torch.nn.functional as F
 
+from megatron.mpu.initialize import get_tensor_model_parallel_rank
 from megatron import get_args
 from megatron import mpu
 from .module import MegatronModule
@@ -644,7 +645,6 @@ class BigBirdRingParallelAttention(MegatronModule):
 
     def __init__(self, init_method,
                  output_layer_init_method,
-                 linformer_layer_init_method,
                  layer_number,
                  attention_type=AttnType.self_attn,
                  attn_mask_type=AttnMaskType.padding):
@@ -662,7 +662,6 @@ class BigBirdRingParallelAttention(MegatronModule):
         self.attn_mask_type = attn_mask_type
         self.hidden_size = args.hidden_size
         self.block_size = args.block_size
-        self.num_rand_blocks = args.num_rand_blocks
         self.sub_seq_length = args.sub_seq_length
         self.seq_length = args.seq_length
 
@@ -803,15 +802,14 @@ class BigBirdRingParallelAttention(MegatronModule):
             attention_mask.size(1),
             self.block_size,
             self.seq_length
-        ) if first_product else None
+        ) if first_product is not None else None
         last_product_mask = attention_mask[:, :, ((local_blocks - 1) * self.block_size):(local_blocks * self.block_size)].view(
             attention_mask.size(0),
             attention_mask.size(1),
             self.block_size,
             self.seq_length
-        ) if last_product else None
-        attention_mask = self.big_bird_attn_mask(attention_mask, local_blocks, self.block_size)
-        attention_mask = attention_mask.view_as(inner_product)
+        ) if last_product is not None else None
+        attention_mask = self.get_attention_mask(attention_mask, local_blocks, self.seq_length // self.block_size, self.block_size)
 
         # ===========================
         # Attention probs and dropout
@@ -898,7 +896,7 @@ class BigBirdRingParallelAttention(MegatronModule):
 
         return output, bias
     
-    def get_attention_mask(self, attention_mask, local_blocks, block_size):
+    def get_attention_mask(self, attention_mask, local_blocks, total_blocks, block_size):
         big_bird_attn_mask = torch.empty(
             attention_mask.size(0),
             attention_mask.size(1),
@@ -913,10 +911,16 @@ class BigBirdRingParallelAttention(MegatronModule):
         big_bird_attn_mask[:, :, :, (3 * block_size):(4 * block_size)] = attention_mask[:, :, :, 0:block_size]
         big_bird_attn_mask[:, :, :, (4 * block_size):(5 * block_size)] = attention_mask[:, :, :, ((total_blocks - 1) * block_size):(total_blocks * block_size)]
 
-        # fill sliding windoe attention mask
+        # fill sliding window attention mask
+        rank = get_tensor_model_parallel_rank()
+        start_block, end_block = (self.sub_seq_length * rank) // self.block_size, ((self.sub_seq_length * (rank + 1)) // self.block_size) - 1
         for i in range(local_blocks):
-            big_bird_attn_mask[:, :, (i * block_size):((i + 1) * block_size), :(3 * block_size)] =
-                attention_mask[:, :, (i * block_size):((i + 1) * block_size), ((i - 1) * block_size):((i + 2) * block_size)]
+            if i == 0 and start_block == 0:
+                continue
+            elif i == local_blocks - 1 and end_block == total_blocks - 1:
+                continue
+            big_bird_attn_mask[:, :, (i * block_size):((i + 1) * block_size), :(3 * block_size)] = \
+                attention_mask[:, :, (i * block_size):((i + 1) * block_size), ((i + start_block - 1) * block_size):((i + start_block + 2) * block_size)]
 
         return big_bird_attn_mask
 
@@ -1031,19 +1035,24 @@ class ParallelTransformerLayer(MegatronModule):
         # NOTE: for RingParallelAttention  #
         ####################################
         # Self attention.
-        self.self_attention = RingParallelAttention(
-            init_method,
-            output_layer_init_method,
-            layer_number,
-            attention_type=AttnType.self_attn,
-            attn_mask_type=self_attn_mask_type)
+        # TODO (chai): Add BigBird only if sequence length > 1024
+        if args.bigbird:
+            self.self_attention = BigBirdRingParallelAttention(
+                init_method,
+                output_layer_init_method,
+                layer_number,
+                attention_type=AttnType.self_attn,
+                attn_mask_type=self_attn_mask_type
+            )
+        else:
+            self.self_attention = RingParallelAttention(
+                init_method,
+                output_layer_init_method,
+                layer_number,
+                attention_type=AttnType.self_attn,
+                attn_mask_type=self_attn_mask_type
+            )
 
-        # self.self_attention = ParallelAttention(
-        #     init_method,
-        #     output_layer_init_method,
-        #     layer_number,
-        #     attention_type=AttnType.self_attn,
-        #     attn_mask_type=self_attn_mask_type)
         self.hidden_dropout = args.hidden_dropout
         self.bias_dropout_fusion = args.bias_dropout_fusion
 

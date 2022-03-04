@@ -261,7 +261,9 @@ def _add_network_size_args(parser):
     group.add_argument('--num-layers', type=int, default=None,
                        help='Number of transformer layers.')
     group.add_argument('--hidden-size', type=int, default=None,
-                       help='Tansformer hidden size.')
+                       help='Transformer hidden size.')
+    group.add_argument('--block-size', type=int, default=None,
+                       help='Block size for Big Bird attention')
     group.add_argument('--ffn-hidden-size', type=int, default=None,
                        help='Transformer Feed-Forward Network hidden size. '
                        'This is set to 4*hidden-size if not provided')
@@ -360,6 +362,8 @@ def _add_regularization_args(parser):
 def _add_training_args(parser):
     group = parser.add_argument_group(title='training')
 
+    group.add_argument('--bigbird', action='store_true',
+                       help='Use the Big Bird model.')
     group.add_argument('--micro-batch-size', type=int, default=None,
                        help='Batch size per model instance (local batch size). '
                        'Global batch size is local batch size times data '

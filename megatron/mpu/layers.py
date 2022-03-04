@@ -26,6 +26,7 @@ import torch.nn.init as init
 from torch.nn.parameter import Parameter
 
 from .initialize import get_tensor_model_parallel_rank
+from .initialize import get_tensor_model_parallel_src_rank
 from .initialize import get_tensor_model_parallel_world_size
 from .initialize import get_tensor_model_parallel_group
 from .mappings import copy_to_tensor_model_parallel_region
@@ -725,10 +726,10 @@ def _calc_current_device_block_range(rank):
     return start_block, end_block - 1
 
 def _calc_device_with_first_block():
-    return 0
+    return get_tensor_model_parallel_src_rank()
 
 def _calc_device_with_last_block():
-    return get_tensor_model_parallel_world_size() - 1
+    return _calc_device_with_first_block() + get_tensor_model_parallel_world_size() - 1
 
 def _calc_current_device_inner_product_blocks(rank, total_blocks):
     start_block, end_block = _calc_current_device_block_range(rank)
@@ -859,17 +860,17 @@ class BigBirdRingQK(torch.autograd.Function):
 
         # apply mask to sliding window if first or second (or last or second last) block present
         inner_block_range = _calc_current_device_inner_product_blocks(local_rank, total_blocks)
-        if first_product and cur_start_block <= 1 <= cur_end_block:
+        if first_product is not None and cur_start_block <= 1 <= cur_end_block:
             inner_product[:, 0].fill_(-10000.0)
             inner_product[:, 1, :, (3 * args.block_size):(4 * args.block_size)].fill_(-10000.0)
-        elif first_product:
+        elif first_product is not None:
             inner_product[:, 0].fill_(-10000.0)
         elif cur_start_block <= 1 <= cur_end_block:
             inner_product[:, 0, :, (3 * args.block_size):(4 * args.block_size)].fill_(-10000.0)
-        if last_product and cur_start_block <= total_blocks - 2 <= cur_end_block:
+        if last_product is not None and cur_start_block <= total_blocks - 2 <= cur_end_block:
             inner_product[:, -1].fill_(-10000.0)
             inner_product[:, -2, :, (4 * args.block_size):(5 * args.block_size)].fill_(-10000.0)
-        elif last_product:
+        elif last_product is not None:
             inner_product[:, -1].fill_(-10000.0)
         elif cur_start_block <= total_blocks - 2 <= cur_end_block:
             inner_product[:, -1, :, (4 * args.block_size):(5 * args.block_size)].fill_(-10000.0)
@@ -1092,7 +1093,7 @@ class BigBirdRingAV(torch.autograd.Function):
         # compute AV sliding window attention
         # TODO (chai): Consider breaking down into parts to save memory
         inner_context += torch.matmul(
-            inner_product[:, :, :, :(3 * block_size)], 
+            inner_product[:, :, :, :(3 * args.block_size)], 
             torch.cat((sub_block_v[:, :-2], sub_block_v[:, 1:-1], sub_block_v[:, 2:]), dim=2)
         )
 

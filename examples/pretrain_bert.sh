@@ -7,6 +7,8 @@ CHECKPOINT_PATH=checkpoints/my-bert_checkpoints
 VOCAB_PATH=../model/bert-large-uncased-vocab.txt
 
 python pretrain_bert.py \
+       --bigbird \
+       --block-size $BLOCK_SIZE \
        --num-layers $NUM_LAYERS \
        --hidden-size $HIDDEN_SIZE \
        --num-attention-heads $NUM_HEADS \
