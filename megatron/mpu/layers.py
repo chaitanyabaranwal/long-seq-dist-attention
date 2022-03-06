@@ -784,15 +784,20 @@ class BigBirdRingQK(torch.autograd.Function):
 
         # create left and right key segments and first and last query block respectively
         # this is needed to batch calculate the sliding window attention later
-        first_q_left_block = torch.empty(
-            args.micro_batch_size * args.num_attention_heads,
-            1,
-            args.hidden_size // args.num_attention_heads,
-            args.block_size,
-            dtype=sub_block_q.dtype,
-            device=torch.cuda.current_device()
-        )
-        last_q_right_block = torch.empty_like(first_q_left_block)
+        if local_world_size > 1:
+            first_q_left_block = torch.empty(
+                args.micro_batch_size * args.num_attention_heads,
+                1,
+                args.hidden_size // args.num_attention_heads,
+                args.block_size,
+                dtype=sub_block_q.dtype,
+                device=torch.cuda.current_device()
+            )
+            last_q_right_block = torch.empty_like(first_q_left_block)
+        else:
+            first_q_left_block = sub_block_k[:, -1:].transpose(2, 3)
+            last_q_right_block = sub_block_k[:, 0:1].transpose(2, 3)
+
         sub_block_k = sub_block_k.transpose(2, 3)
 
         # first and last block pay attention from all blocks
@@ -843,8 +848,9 @@ class BigBirdRingQK(torch.autograd.Function):
             if end_block == (cur_start_block - 1) % total_blocks:
                 first_q_left_block = sub_block_k[:, -1:]
         
-        # get back original block
-        sub_block_k = ring_forward(sub_block_k)
+        if local_world_size > 1:
+            # get back original block
+            sub_block_k = ring_forward(sub_block_k)
         # concatenate any extra key blocks needed for sliding window attention
         sub_block_k = torch.cat((first_q_left_block, sub_block_k, last_q_right_block), dim=1)
 
@@ -893,8 +899,8 @@ class BigBirdRingQK(torch.autograd.Function):
         cur_start_block, cur_end_block = _calc_current_device_block_range(local_rank)
 
         # setup tensors for the gradients
-        grad_block_q = torch.zeros_like(sub_block_q)
-        grad_block_k = torch.zeros_like(grad_block_q, dtype=sub_block_k.dtype)
+        grad_block_q = torch.zeros_like(sub_block_q, dtype=grad_inner_product.dtype)
+        grad_block_k = torch.zeros_like(grad_block_q, dtype=grad_inner_product.dtype)
 
         # calculate local gradients of sub_block_q based on sliding window attention
         # TODO (chai): Consider breaking down into parts to save memory
@@ -1040,15 +1046,19 @@ class BigBirdRingAV(torch.autograd.Function):
 
         # create left and right value segments and first and last attention block respectively
         # this is needed to batch calculate the sliding window output later
-        first_a_left_block = torch.empty(
-            args.micro_batch_size * args.num_attention_heads,
-            1,
-            args.block_size,
-            args.hidden_size // args.num_attention_heads,
-            dtype=sub_block_v.dtype,
-            device=torch.cuda.current_device()
-        )
-        last_a_right_block = torch.empty_like(first_a_left_block)
+        if local_world_size > 1:
+            first_a_left_block = torch.empty(
+                args.micro_batch_size * args.num_attention_heads,
+                1,
+                args.block_size,
+                args.hidden_size // args.num_attention_heads,
+                dtype=sub_block_v.dtype,
+                device=torch.cuda.current_device()
+            )
+            last_a_right_block = torch.empty_like(first_a_left_block)
+        else:
+            first_a_left_block = sub_block_v[:, -1:]
+            last_a_right_block = sub_block_v[:, 0:1]
 
         # first and last attention block attend to all value blocks
         if first_context is not None:
@@ -1082,8 +1092,9 @@ class BigBirdRingAV(torch.autograd.Function):
             if end_block == (cur_start_block - 1) % total_blocks:
                 first_a_left_block = sub_block_v[:, -1:]
         
-        # get back original block
-        sub_block_v = ring_forward(sub_block_v)
+        if local_world_size > 1:
+            # get back original block
+            sub_block_v = ring_forward(sub_block_v)
         # concatenate any extra value blocks for sliding window attention
         sub_block_v = torch.cat((first_a_left_block, sub_block_v, last_a_right_block), dim=1)
 
