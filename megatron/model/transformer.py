@@ -897,32 +897,28 @@ class BigBirdRingParallelAttention(MegatronModule):
         return output, bias
     
     def get_attention_mask(self, attention_mask, local_blocks, total_blocks, block_size):
-        big_bird_attn_mask = torch.empty(
+        # reshape attention mask to get diagonal
+        band_shape = (attention_mask.size(0), attention_mask.size(1), local_blocks * block_size, block_size)
+        attention_mask_reshape = attention_mask.view(
             attention_mask.size(0),
             attention_mask.size(1),
-            attention_mask.size(2),
-            5 * block_size,
-            dtype=attention_mask.dtype,
-            device=torch.cuda.current_device()
+            local_blocks,
+            total_blocks,
+            block_size,
+            block_size
         )
-        big_bird_attn_mask.fill_(False)
 
-        # fill global attention mask
-        big_bird_attn_mask[:, :, :, (3 * block_size):(4 * block_size)] = attention_mask[:, :, :, 0:block_size]
-        big_bird_attn_mask[:, :, :, (4 * block_size):(5 * block_size)] = attention_mask[:, :, :, ((total_blocks - 1) * block_size):(total_blocks * block_size)]
-
-        # fill sliding window attention mask
         rank = get_tensor_model_parallel_rank()
         start_block, end_block = (self.sub_seq_length * rank) // self.block_size, ((self.sub_seq_length * (rank + 1)) // self.block_size) - 1
-        for i in range(local_blocks):
-            if i == 0 and start_block == 0:
-                continue
-            elif i == local_blocks - 1 and end_block == total_blocks - 1:
-                continue
-            big_bird_attn_mask[:, :, (i * block_size):((i + 1) * block_size), :(3 * block_size)] = \
-                attention_mask[:, :, (i * block_size):((i + 1) * block_size), ((i + start_block - 1) * block_size):((i + start_block + 2) * block_size)]
 
-        return big_bird_attn_mask
+        first_band = torch.diagonal(attention_mask_reshape[:, :, :, start_block:(end_block + 1)], dim1=2, dim2=3).reshape(*band_shape)
+        second_band = torch.diagonal(torch.roll(attention_mask_reshape, 1, 3)[:, :, :, start_block:(end_block + 1)], dim1=2, dim2=3).reshape(*band_shape)
+        third_band = torch.diagonal(torch.roll(attention_mask_reshape, -1, 3)[:, :, :, start_block:(end_block + 1)], dim1=2, dim2=3).reshape(*band_shape)
+
+        return torch.cat(
+            (first_band, second_band, third_band, attention_mask[:, :,:, :block_size], attention_mask[:, :, :, (-1 * block_size):]),
+            dim=3
+        )
 
 ####################################
 # NOTE: for RingParallelAttention  #
