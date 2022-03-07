@@ -44,6 +44,7 @@ torch._C._jit_override_can_fuse_on_gpu(True)
      b: batch size
      s: sequence length
      l: number of layers
+     lin_k: Linformer constant parameter
     Transformer takes input of size [s, b, h] and returns a
     tensor of the same size. We use the following arguments:
         hyperparameters: transformer hyperparameters
@@ -615,6 +616,276 @@ class RingParallelAttention(MegatronModule):
 
         return output, bias
 
+#############################################
+# NOTE: for LinformerRingParallelAttention  #
+#############################################
+class LinformerRingParallelAttention(MegatronModule):
+    """
+    Ring-parallel self attention layer abstract class, which is combined
+    with the linear complexity Transformer Linformer to reduce attention
+    computation complexity even further.
+
+    Original paper can be found at https://arxiv.org/abs/2006.04768.
+
+    The current implementation does not have layerwise sharing or key-value sharing
+    but has headwise sharing. Alternative configurations can be implemented as future work.
+
+    Self-attention layer takes input with size [b, s, h]
+    and returns output of the same size.
+    """
+
+    def __init__(self, init_method,
+                 output_layer_init_method,
+                 linformer_layer_init_method,
+                 layer_number,
+                 attention_type=AttnType.self_attn,
+                 attn_mask_type=AttnMaskType.padding):
+        super(LinformerRingParallelAttention, self).__init__()
+        args = get_args()
+        self.fp16 = args.fp16
+        self.bf16 = args.bf16
+
+        self.apply_query_key_layer_scaling = args.apply_query_key_layer_scaling
+        self.attention_softmax_in_fp32 = args.attention_softmax_in_fp32
+        if self.apply_query_key_layer_scaling:
+            self.attention_softmax_in_fp32 = True
+        self.layer_number = max(1, layer_number)
+        self.attention_type = attention_type
+        self.attn_mask_type = attn_mask_type
+        self.hidden_size = args.hidden_size
+        self.linformer_k = args.linformer_k
+
+        projection_size = args.kv_channels * args.num_attention_heads
+        self.hidden_size_per_attention_head = mpu.divide(
+            projection_size, args.num_attention_heads)
+        self.num_attention_heads = args.num_attention_heads
+        self.world_size = mpu.get_tensor_model_parallel_world_size()
+
+        # Strided linear layer.
+        if attention_type == AttnType.self_attn:
+            self.query_key_value = mpu.Linear(
+                args.hidden_size,
+                3 * projection_size,
+                init_method=init_method)
+        else:
+            raise NotImplementedError('cross-attention is not implemented for LinformerRingParallelAttention')
+        
+        # Add a projection matrix for original key matrix
+        # This essentially will compute (K' = K^T * A), where K' is a (d * k) matrix.
+        self.key_projection = mpu.Linear(
+            args.sub_seq_length,
+            self.linformer_k,
+            bias=False,
+            init_method=linformer_layer_init_method
+        )
+
+        coeff = None
+        self.norm_factor = math.sqrt(self.hidden_size)
+        if self.apply_query_key_layer_scaling:
+            coeff = self.layer_number
+            self.norm_factor *= coeff
+
+        self.scale_mask_softmax = FusedScaleMaskSoftmax(
+            self.fp16, self.bf16,
+            self.attn_mask_type,
+            args.masked_softmax_fusion,
+            attention_mask_func,
+            self.attention_softmax_in_fp32,
+            coeff
+        )
+
+        # Dropout. Note that for a single iteration, this layer will generate
+        # different outputs on different number of parallel partitions but
+        # on average it should not be partition dependent.
+        self.attention_dropout = torch.nn.Dropout(args.attention_dropout)
+
+        # Add a projection matrix for original value matrix
+        # This essentially will compute (V' = V^T * A), where V' is the transpose of the
+        # (d * k) projected value matrix. Must remember to transpose the result from this.
+        self.value_projection = mpu.Linear(
+            args.sub_seq_length,
+            self.linformer_k,
+            bias=False,
+            init_method=linformer_layer_init_method
+        )
+
+        # Output.
+        self.dense = mpu.Linear(
+            projection_size,
+            args.hidden_size,
+            init_method=output_layer_init_method,
+            skip_bias_add=True)
+
+    def forward(self, hidden_states, attention_mask, layer_past=None,
+                get_key_value=False, encoder_output=None):
+        # hidden_states: [sq, b, h]
+
+        # =====================
+        # Query, Key, and Value
+        # =====================
+
+        if self.attention_type == AttnType.self_attn:
+            # Attention heads [sq, b, h] --> [sq, b, (3 * hn * num_heads)]
+            mixed_x_layer, _ = self.query_key_value(hidden_states)
+
+            # [sq, b, num_heads, 3 * hn] --> 3 [sq, b, num_heads, hn]
+            new_tensor_shape = mixed_x_layer.size()[:-1] + \
+                               (self.num_attention_heads,
+                                3 * self.hidden_size_per_attention_head)
+            mixed_x_layer = mixed_x_layer.view(*new_tensor_shape)
+            (query_layer,
+             key_layer,
+             value_layer) = mpu.split_tensor_along_last_dim(mixed_x_layer, 3)
+        else:
+            raise NotImplementedError('cross-attention is not implemented for RingParallelAttention')
+
+        # ==================================
+        # Adjust key and value for inference
+        # ==================================
+
+        if layer_past is not None:
+            past_key, past_value = layer_past
+            key_layer = torch.cat((past_key.type_as(key_layer),
+                                   key_layer), dim=0)
+            value_layer = torch.cat((past_value.type_as(value_layer),
+                                     value_layer), dim=0)
+        if get_key_value:
+            present = (key_layer, value_layer)
+
+        # =============================================
+        # Apply attention mask to key and value
+        # because Linformer mask mechanism is different
+        # =============================================
+
+        # [b, num_heads, sq, lin_k]
+        output_size = (query_layer.size(1),
+                       query_layer.size(2),
+                       query_layer.size(0),
+                       self.linformer_k)
+
+        # [sk, b, num_heads, hn] -> [b, num_heads, sk, hn]
+        key_layer = key_layer.view(output_size[0], output_size[1],
+                                   key_layer.size(0), -1)
+        assert attention_mask.size(0) == key_layer.size(0) and attention_mask.size(2) == key_layer.size(2), \
+            'Attention mask dimensions do not match key matrix dimensions'
+        key_layer = key_layer.masked_fill(attention_mask, 0.0)
+
+        # [sk, b, num_heads, hn] -> [b, num_heads, sk, hn]
+        value_layer = value_layer.view(output_size[0], output_size[1],
+                                   value_layer.size(0), -1)
+        assert attention_mask.size(0) == value_layer.size(0) and attention_mask.size(2) == value_layer.size(2), \
+            'Attention mask dimensions do not match value matrix dimensions'
+        value_layer = value_layer.masked_fill(attention_mask, 0.0)
+
+        # ===================================
+        # Raw attention scores. [b, num_heads, s, s]
+        # ===================================
+
+        # [sq, b, num_heads, hn] -> [sq, b * num_heads, hn]
+        query_layer = query_layer.view(output_size[2],
+                                       output_size[0] * output_size[1], -1)
+        
+        # [b, num_heads, sk, hn] -> [sk, b * num_heads, hn]
+        key_layer = key_layer.view(key_layer.size(2),
+                                   output_size[0] * output_size[1], -1)
+        # [sk, b * num_heads, hn] -> [b * num_heads, hn, sk]
+        key_layer = key_layer.view(
+            key_layer.size(1), 
+            key_layer.size(2), 
+            key_layer.size(0)
+        )
+        # Project key matrix into lower dimension, using projection layer
+        # [b * num_heads, hn, sk] -> [b * num_heads, hn, lin_k]
+        key_layer, _ = self.key_projection(key_layer)
+
+        # [b, sq, sk]
+        attention_scores = mpu.LinformerRingQK.apply(
+            query_layer.transpose(0, 1).contiguous(), # [b * num_heads, sq, hn]
+            key_layer.contiguous() # [b * num_heads, hn, lin_k]
+        )
+        attention_scores /= self.norm_factor
+
+        # change view to [b, num_heads, sq, lin_k]
+        attention_scores = attention_scores.view(*output_size)
+
+        # ===========================
+        # Attention probs and dropout
+        # ===========================
+
+        # attention scores and attention mask [b, num_heads, sq, sk]
+        attention_mask = attention_mask.broadcast_to(
+            attention_mask.size(0),
+            attention_mask.size(1),
+            attention_mask.size(2),
+            self.linformer_k
+        ).contiguous()
+        attention_probs = self.scale_mask_softmax(attention_scores,
+                                                  attention_mask)
+
+        # This is actually dropping out entire tokens to attend to, which might
+        # seem a bit unusual, but is taken from the original Transformer paper.
+        with mpu.get_cuda_rng_tracker().fork():
+            attention_probs = self.attention_dropout(attention_probs)
+
+        # =========================
+        # Context layer. [sq, b, hp]
+        # =========================
+
+        # value_layer -> context layer.
+        # [b, num_heads, sk, hn] --> [b, num_heads, sq, hn]
+
+        # context layer shape: [b, num_heads, sq, hn]
+        output_size = (value_layer.size(0),
+                       value_layer.size(1),
+                       query_layer.size(0),
+                       value_layer.size(3))
+        #
+        # # change view [sk, b * num_heads, hn]
+        value_layer = value_layer.contiguous().view(value_layer.size(2),
+                                       output_size[0] * output_size[1], -1)
+        # [sk, b * num_heads, hn] -> [b * num_heads, hn, sk]
+        value_layer = value_layer.view(
+            value_layer.size(1),
+            value_layer.size(2),
+            value_layer.size(0)
+        )
+        # Project value matrix into lower dimension, using projection layer
+        # [b * num_heads, hn, sk] -> [b * num_heads, hn, lin_k]
+        value_layer, _ = self.value_projection(value_layer)
+
+        # # change view [b * num_heads, sq, sk]
+        attention_probs = attention_probs.view(attention_probs.size(0) * attention_probs.size(1),
+                                               attention_probs.size(2),
+                                               attention_probs.size(3))
+
+        # matmul: [b*num_heads, sq, hn]
+        # context_layer = torch.bmm(attention_probs, value_layer.transpose(0, 1))
+        context_layer = mpu.LinformerRingAV.apply(
+            attention_probs, # [b * num_heads, sq, sk]
+            value_layer.transpose(2, 1).contiguous() # [b * num_heads, lin_k, hn]
+        )
+
+        # # change view [b, num_heads, sq, hn]
+        context_layer = context_layer.view(*output_size)
+
+        # # [b, np, sq, hn] --> [sq, b, np, hn]
+        context_layer = context_layer.permute(2, 0, 1, 3).contiguous()
+
+        # # [sq, b, np, hn] --> [sq, b, hp]
+        new_context_layer_shape = context_layer.size()[:-2] + \
+            (self.hidden_size_per_attention_head * self.num_attention_heads,)
+        context_layer = context_layer.view(*new_context_layer_shape)
+
+        # =================
+        # Output. [sq, b, h]
+        # =================
+        # context_layer = context_layer.transpose(1, 0).contiguous()
+        output, bias = self.dense(context_layer)
+
+        if get_key_value:
+            output = [output, present]
+
+        return output, bias
 
 ###########################################
 # NOTE: for BigBirdRingParallelAttention  #
@@ -1031,8 +1302,18 @@ class ParallelTransformerLayer(MegatronModule):
         # NOTE: for RingParallelAttention  #
         ####################################
         # Self attention.
+        # Use Linformer based layer if applicable.
+        if args.linformer_k:
+            self.self_attention = LinformerRingParallelAttention(
+                init_method,
+                output_layer_init_method,
+                torch.nn.init.xavier_normal_,
+                layer_number,
+                attention_type=AttnType.self_attn,
+                attn_mask_type=self_attn_mask_type
+            )
         # TODO (chai): Add BigBird only if sequence length > 1024
-        if args.bigbird:
+        elif args.bigbird:
             self.self_attention = BigBirdRingParallelAttention(
                 init_method,
                 output_layer_init_method,

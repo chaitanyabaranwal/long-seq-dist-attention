@@ -274,6 +274,9 @@ def _add_network_size_args(parser):
                        'attention. This is set to '
                        '   args.hidden_size // args.num_attention_heads '
                        'if not provided.')
+    group.add_argument('--linformer-k', type=int, default=None,
+                       help='Projection dimension for the Linformer projection '
+                      'matrix. This is set to 256 if not provided.')
     group.add_argument('--max-position-embeddings', type=int, default=None,
                        help='Maximum number of position embeddings to use. '
                        'This is the size of position embedding.')

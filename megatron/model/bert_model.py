@@ -34,26 +34,37 @@ from megatron.mpu.initialize import get_tensor_model_parallel_world_size
 from megatron.mpu.initialize import get_tensor_model_parallel_group
 
 def bert_extended_attention_mask(attention_mask):
+    '''
+    We create a 3D attention mask from a 2D tensor mask.
+    '''
     args = get_args()
     local_rank = get_tensor_model_parallel_rank()
     start_index = local_rank * args.sub_seq_length
     end_index = (local_rank + 1) * args.sub_seq_length
+    
+    # If Linformer is enabled, then the attention mask mechanism is different.
+    # The masks here are already partitioned by subsequence then, and we can just
+    # return that mask.
+    if args.linformer_k:
+        # [b, s/D, 1]
+        attention_mask_bs1 = attention_mask.unsqueeze(2)
+        # [b, 1, s/D, 1]
+        extended_attention_mask = attention_mask_bs1.unsqueeze(1)
+    else:
+        # [b, 1, s]
+        attention_mask_b1s = attention_mask.unsqueeze(1)
+        # [b, s, 1]
+        attention_mask_bs1 = attention_mask.unsqueeze(2)
+        # [b, s/D, s]
+        attention_mask_bss = attention_mask_b1s * attention_mask_bs1
 
-    # We create a 3D attention mask from a 2D tensor mask.
-    # [b, 1, s]
-    attention_mask_b1s = attention_mask.unsqueeze(1)
-    # [b, s, 1]
-    attention_mask_bs1 = attention_mask.unsqueeze(2)
-    # [b, s/D, s]
-    attention_mask_bss = attention_mask_b1s * attention_mask_bs1
+        ####################################
+        # NOTE: for RingParallelAttention  #
+        ####################################
+        attention_mask_bss = attention_mask_bss[:, start_index:end_index, :]
 
-    ####################################
-    # NOTE: for RingParallelAttention  #
-    ####################################
-    attention_mask_bss = attention_mask_bss[:, start_index:end_index, :]
-
-    # [b, 1, s/D, s]
-    extended_attention_mask = attention_mask_bss.unsqueeze(1)
+        # [b, 1, s/D, s]
+        extended_attention_mask = attention_mask_bss.unsqueeze(1)
 
     # Convert attention mask to binary:
     extended_attention_mask = (extended_attention_mask < 0.5)

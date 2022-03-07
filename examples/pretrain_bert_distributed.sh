@@ -20,6 +20,7 @@ python -m torch.distributed.launch $DISTRIBUTED_ARGS \
        --block-size $BLOCK_SIZE \
        --num-layers $NUM_LAYERS \
        --hidden-size $HIDDEN_SIZE \
+       --linformer-k $LINFORMER_K \
        --num-attention-heads $NUM_HEADS \
        --micro-batch-size $MICRO_BATCH_SIZE \
        --global-batch-size $GLOBAL_BATCH_SIZE \
