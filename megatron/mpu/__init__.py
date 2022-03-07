@@ -53,7 +53,7 @@ from .layers import VocabParallelEmbedding
 from .layers import (set_tensor_model_parallel_attributes,
                      set_defaults_if_not_set_tensor_model_parallel_attributes,
                      copy_tensor_model_parallel_attributes)
-from .layers import Linear, RingQK, RingAV, LinformerRingQK, LinformerRingAV, VocabEmbedding
+from .layers import Linear, RingQK, RingAV, LinformerRingQK, LinformerRingAV, BigBirdRingQK, BigBirdRingAV, VocabEmbedding
                      
 from .mappings import copy_to_tensor_model_parallel_region
 from .mappings import gather_from_tensor_model_parallel_region
