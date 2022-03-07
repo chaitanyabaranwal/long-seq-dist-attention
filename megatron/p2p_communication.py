@@ -113,17 +113,15 @@ def _communicate(tensor_send_next, tensor_send_prev, recv_prev, recv_next,
 def ring_forward(tensor_send_next):
     args = get_args()
     buffer_shape = tensor_send_next.size()
-    dtype = args.params_dtype
 
     ops = []
 
     current_rank = torch.distributed.get_rank()
     # print(f'current rank: {current_rank}, next rank: {mpu.get_tensor_model_parallel_next_rank()}, prev rank: {mpu.get_tensor_model_parallel_prev_rank()}')
 
-    tensor_recv_prev = torch.empty(buffer_shape,
+    tensor_recv_prev = torch.empty_like(tensor_send_next,
                                    requires_grad=True,
-                                   device=torch.cuda.current_device(),
-                                   dtype=dtype)
+                                   device=torch.cuda.current_device())
 
     # send to next rank
     send_next_op = torch.distributed.P2POp(
