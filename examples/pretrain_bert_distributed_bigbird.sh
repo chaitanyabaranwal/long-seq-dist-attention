@@ -17,6 +17,8 @@ DISTRIBUTED_ARGS="--nproc_per_node $GPUS_PER_NODE --nnodes $NNODES --node_rank $
 python -m torch.distributed.launch $DISTRIBUTED_ARGS \
        pretrain_bert.py \
        --tensor-model-parallel-size $TENSOR_PARALLEL_SIZE \
+       --bigbird \
+       --block-size $BLOCK_SIZE \
        --num-layers $NUM_LAYERS \
        --hidden-size $HIDDEN_SIZE \
        --num-attention-heads $NUM_HEADS \
@@ -25,20 +27,19 @@ python -m torch.distributed.launch $DISTRIBUTED_ARGS \
        --seq-length $SEQ_LENGTH \
        --max-position-embeddings $SEQ_LENGTH \
        --train-iters $TRAIN_ITERS \
+       --lr-decay-iters 990000 \
        --save $CHECKPOINT_PATH \
        --load $CHECKPOINT_PATH \
        --data-path $DATA_PATH \
        --vocab-file $VOCAB_PATH \
        --data-impl mmap \
        --split 949,50,1 \
-       --distributed-backend nccl \
        --lr 0.0001 \
+       --min-lr 0.00001 \
        --lr-decay-style linear \
-       --min-lr 1.0e-5 \
-       --lr-decay-iters 990000 \
+       --lr-warmup-fraction .01 \
        --weight-decay 1e-2 \
        --clip-grad 1.0 \
-       --lr-warmup-fraction .01 \
        --log-interval 100 \
        --save-interval 10000 \
        --eval-interval 1000 \
@@ -47,4 +48,3 @@ python -m torch.distributed.launch $DISTRIBUTED_ARGS \
        --exp
 
 rm -rf ./checkpoints/*
-

@@ -13,6 +13,7 @@ layer=${7:-"12"}
 hidden=${8:-"768"}
 heads=${9:-"12"}
 iters=${10:-"50000"}
+linformer_k=${12:-"256"}
 
 #python ./scripts/get_host_ip_addr.py > "./HOST"
 #ADDR=`cat ./HOST`
@@ -28,6 +29,6 @@ export NUM_LAYERS=$layer
 export HIDDEN_SIZE=$hidden
 export NUM_HEADS=$heads
 export TRAIN_ITERS=$iters
+export LINFORMER_K=$linformer_k
 
-bash ./examples/pretrain_bert_distributed.sh
-
+bash ./examples/pretrain_bert_distributed_linformer.sh

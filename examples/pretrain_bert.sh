@@ -7,8 +7,6 @@ CHECKPOINT_PATH=checkpoints/my-bert_checkpoints
 VOCAB_PATH=../vocab/bert-large-uncased-vocab.txt
 
 python pretrain_bert.py \
-       --bigbird \
-       --block-size $BLOCK_SIZE \
        --num-layers $NUM_LAYERS \
        --hidden-size $HIDDEN_SIZE \
        --num-attention-heads $NUM_HEADS \
@@ -35,10 +33,7 @@ python pretrain_bert.py \
        --eval-interval 1000 \
        --eval-iters 10 \
        --fp16 \
-       --fp32-residual-connection \
-       --attention-softmax-in-fp32 \
-       --accumulate-allreduce-grads-in-fp32 \
-       --apply-residual-connection-post-layernorm
+       --exp
 
 rm -rf ./checkpoints/*
 

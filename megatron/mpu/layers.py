@@ -1169,7 +1169,7 @@ class BigBirdRingAV(torch.autograd.Function):
             first_context += torch.sum(torch.matmul(first_product[:, cur_start_block:(cur_end_block + 1)], sub_block_v), dim=1, keepdims=True)
             inner_context += torch.matmul(inner_product[:, :, :, (3 * args.block_size):(4 * args.block_size)], sub_block_v[:, 0:1])
         if last_context is not None:
-            last_context += torch.sum(torch.matmul(last_product[:, :, cur_start_block:(cur_end_block + 1)], sub_block_v), dim=1, keepdims=True)
+            last_context += torch.sum(torch.matmul(last_product[:, cur_start_block:(cur_end_block + 1)], sub_block_v), dim=1, keepdims=True)
             inner_context += torch.matmul(inner_product[:, :, :, (4 * args.block_size):(5 * args.block_size)], sub_block_v[:, -1:])
         
         # left of first attention block and right of last block remaining, since not locally present

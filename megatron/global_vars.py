@@ -109,6 +109,10 @@ def _handle_experiment_logs(args):
         args.num_attention_heads,
         args.hidden_size
     )
+    if args.linformer_k:
+        exp_name += '_linformer{}'.format(args.linformer_k)
+    if args.bigbird:
+        exp_name += '_bigbird{}'.format(args.block_size)
 
     # create workspace
     exp_path = f'./experiment/{exp_name}'
