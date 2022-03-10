@@ -8,9 +8,9 @@ NNODES=1
 NODE_RANK=0
 WORLD_SIZE=$(($GPUS_PER_NODE*$NNODES))
 
-DATA_PATH=my-bert_text_sentence
+DATA_PATH=../data/bert/my-bert_text_sentence
 CHECKPOINT_PATH=checkpoints/my-bert_checkpoints
-VOCAB_PATH=../model/bert-large-uncased-vocab.txt
+VOCAB_PATH=../vocab/bert-large-uncased-vocab.txt
 
 DISTRIBUTED_ARGS="--nproc_per_node $GPUS_PER_NODE --nnodes $NNODES --node_rank $NODE_RANK --master_addr $MASTER_ADDR --master_port $MASTER_PORT"
 

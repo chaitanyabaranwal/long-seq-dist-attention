@@ -2,9 +2,9 @@
 
 RANK=0
 WORLD_SIZE=1
-DATA_PATH=my-bert_text_sentence
+DATA_PATH=../data/bert/my-bert_text_sentence
 CHECKPOINT_PATH=checkpoints/my-bert_checkpoints
-VOCAB_PATH=../model/bert-large-uncased-vocab.txt
+VOCAB_PATH=../vocab/bert-large-uncased-vocab.txt
 
 python pretrain_bert.py \
        --bigbird \
