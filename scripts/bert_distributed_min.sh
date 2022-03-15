@@ -6,14 +6,13 @@ module load nccl
 np=${1:-"1"}
 pipeline=${2:-"1"}
 tensor=${3:-"4"}
-seq=${4:-"512"}
+seq=${4:-"128"}
 mic_bs=${5:-"8"}
 glb_bs=${6:-"8"}
-linformer_k=${7:-"128"}
-layer=${8:-"12"}
-hidden=${9:-"768"}
-heads=${10:-"12"}
-iters=${11:-"1010"}
+layer=${7:-"2"}
+hidden=${8:-"256"}
+heads=${9:-"8"}
+iters=${10:-"2000"}
 
 #python ./scripts/get_host_ip_addr.py > "./HOST"
 #ADDR=`cat ./HOST`
@@ -29,6 +28,5 @@ export NUM_LAYERS=$layer
 export HIDDEN_SIZE=$hidden
 export NUM_HEADS=$heads
 export TRAIN_ITERS=$iters
-export LINFORMER_K=$linformer_k
 
-bash ./examples/pretrain_bert_distributed_linformer.sh
+bash ./examples/pretrain_bert_distributed.sh
