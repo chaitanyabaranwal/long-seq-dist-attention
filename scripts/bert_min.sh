@@ -12,7 +12,7 @@ glb_bs=${6:-"8"}
 layer=${7:-"2"}
 hidden=${8:-"256"}
 heads=${9:-"8"}
-iters=${10:-"510"}
+iters=${10:-"210"}
 
 #python ./scripts/get_host_ip_addr.py > "./HOST"
 #ADDR=`cat ./HOST`

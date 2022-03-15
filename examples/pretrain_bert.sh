@@ -28,7 +28,7 @@ python pretrain_bert.py \
        --lr-warmup-fraction .01 \
        --weight-decay 1e-2 \
        --clip-grad 1.0 \
-       --log-interval 100 \
+       --log-interval 10 \
        --save-interval 10000 \
        --eval-interval 1000 \
        --eval-iters 10 \
