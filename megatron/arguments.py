@@ -232,6 +232,14 @@ def parse_args(extra_args_provider=None, defaults={},
             'for distribute-checkpointed-activations to work you '\
             'need to enable checkpoint-activations'
 
+    # Linformer
+    if args.linformer_k is not None:
+        assert args.share_heads is not None, \
+            'for Linformer need boolean value for headwise sharing'
+    if args.share_heads:
+        assert args.linformer_k is not None, \
+            'for Linformer need boolean value for headwise sharing'
+
     _print_args(args)
     return args
 
@@ -276,7 +284,9 @@ def _add_network_size_args(parser):
                        'if not provided.')
     group.add_argument('--linformer-k', type=int, default=None,
                        help='Projection dimension for the Linformer projection '
-                      'matrix. This is set to 256 if not provided.')
+                      'matrix.')
+    group.add_argument('--share-heads', action='store_true',
+                       help='Share Linformer projection for each head.')
     group.add_argument('--max-position-embeddings', type=int, default=None,
                        help='Maximum number of position embeddings to use. '
                        'This is the size of position embedding.')

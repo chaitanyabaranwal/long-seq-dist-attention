@@ -654,6 +654,7 @@ class LinformerRingParallelAttention(MegatronModule):
         self.attn_mask_type = attn_mask_type
         self.hidden_size = args.hidden_size
         self.linformer_k = args.linformer_k
+        self.share_heads = args.share_heads
 
         projection_size = args.kv_channels * args.num_attention_heads
         self.hidden_size_per_attention_head = mpu.divide(
@@ -672,12 +673,22 @@ class LinformerRingParallelAttention(MegatronModule):
         
         # Add a projection matrix for original key matrix
         # This essentially will compute (K' = K^T * A), where K' is a (d * k) matrix.
-        self.key_projection = mpu.Linear(
-            args.sub_seq_length,
-            self.linformer_k,
-            bias=False,
-            init_method=linformer_layer_init_method
-        )
+        if args.share_heads:
+            self.key_projection = mpu.Linear(
+                args.sub_seq_length,
+                self.linformer_k,
+                bias=False,
+                init_method=linformer_layer_init_method
+            )
+        else:
+            self.key_projections = [
+                mpu.Linear(
+                    args.sub_seq_length,
+                    self.linformer_k,
+                    bias=False,
+                    init_method=linformer_layer_init_method
+                ) for _ in range(args.num_attention_heads)
+            ]
 
         coeff = None
         self.norm_factor = math.sqrt(self.hidden_size)
@@ -702,12 +713,22 @@ class LinformerRingParallelAttention(MegatronModule):
         # Add a projection matrix for original value matrix
         # This essentially will compute (V' = V^T * A), where V' is the transpose of the
         # (d * k) projected value matrix. Must remember to transpose the result from this.
-        self.value_projection = mpu.Linear(
-            args.sub_seq_length,
-            self.linformer_k,
-            bias=False,
-            init_method=linformer_layer_init_method
-        )
+        if args.share_heads:
+            self.value_projection = mpu.Linear(
+                args.sub_seq_length,
+                self.linformer_k,
+                bias=False,
+                init_method=linformer_layer_init_method
+            )
+        else:
+            self.value_projections = [
+                mpu.Linear(
+                    args.sub_seq_length,
+                    self.linformer_k,
+                    bias=False,
+                    init_method=linformer_layer_init_method
+                ) for _ in range(args.num_attention_heads)
+            ]
 
         # Output.
         self.dense = mpu.Linear(
@@ -785,18 +806,23 @@ class LinformerRingParallelAttention(MegatronModule):
         query_layer = query_layer.view(output_size[2],
                                        output_size[0] * output_size[1], -1)
         
-        # [b, num_heads, sk, hn] -> [sk, b * num_heads, hn]
-        key_layer = key_layer.view(key_layer.size(2),
-                                   output_size[0] * output_size[1], -1)
-        # [sk, b * num_heads, hn] -> [b * num_heads, hn, sk]
-        key_layer = key_layer.view(
-            key_layer.size(1), 
-            key_layer.size(2), 
-            key_layer.size(0)
-        )
+
         # Project key matrix into lower dimension, using projection layer
-        # [b * num_heads, hn, sk] -> [b * num_heads, hn, lin_k]
-        key_layer, _ = self.key_projection(key_layer)
+        if self.share_heads:
+            # [b, num_heads, sk, hn] -> [b * num_heads, hn, sk]
+            key_layer = key_layer.view(output_size[0] * output_size[1], key_layer.size(3), key_layer.size(2))
+            # [b * num_heads, hn, sk] -> [b * num_heads, hn, lin_k]
+            key_layer, _ = self.key_projection(key_layer)
+        else:
+            # [b, num_heads, sk, hn] -> [b, num_heads, hn, sk]
+            key_layer = key_layer.view(output_size[0], output_size[1], key_layer.size(3), key_layer.size(2))
+            # [b, num_heads, hn, sk] -> [b * num_heads, hn, lin_k]
+            key_layer_chunks = torch.chunk(key_layer, self.num_attention_heads, dim=1)
+            key_layer = torch.cat(
+                tuple(self.key_projections[i](chunk)[0] for i, chunk in enumerate(key_layer_chunks)),
+                dim=1
+            )
+            key_layer = key_layer.view(output_size[0] * output_size[1], key_layer.size(2), key_layer.size(3))
 
         # [b, sq, sk]
         attention_scores = mpu.LinformerRingQK.apply(
@@ -812,7 +838,7 @@ class LinformerRingParallelAttention(MegatronModule):
         # Attention probs and dropout
         # ===========================
 
-        # attention scores and attention mask [b, num_heads, sq, sk]
+        # attention scores and attention mask [b, num_heads, sq, lin_k]
         attention_mask = attention_mask.broadcast_to(
             attention_mask.size(0),
             attention_mask.size(1),
@@ -839,21 +865,25 @@ class LinformerRingParallelAttention(MegatronModule):
                        value_layer.size(1),
                        query_layer.size(0),
                        value_layer.size(3))
-        #
-        # # change view [sk, b * num_heads, hn]
-        value_layer = value_layer.contiguous().view(value_layer.size(2),
-                                       output_size[0] * output_size[1], -1)
-        # [sk, b * num_heads, hn] -> [b * num_heads, hn, sk]
-        value_layer = value_layer.view(
-            value_layer.size(1),
-            value_layer.size(2),
-            value_layer.size(0)
-        )
-        # Project value matrix into lower dimension, using projection layer
-        # [b * num_heads, hn, sk] -> [b * num_heads, hn, lin_k]
-        value_layer, _ = self.value_projection(value_layer)
 
-        # # change view [b * num_heads, sq, sk]
+        # Project key matrix into lower dimension, using projection layer
+        if self.share_heads:
+            # [b, num_heads, sk, hn] -> [b * num_heads, hn, sk]
+            value_layer = value_layer.view(output_size[0] * output_size[1], value_layer.size(3), value_layer.size(2))
+            # [b * num_heads, hn, sk] -> [b * num_heads, hn, lin_k]
+            value_layer, _ = self.value_projection(value_layer)
+        else:
+            # [b, num_heads, sk, hn] -> [b, num_heads, hn, sk]
+            value_layer = value_layer.view(output_size[0], output_size[1], value_layer.size(3), value_layer.size(2))
+            # [b, num_heads, hn, sk] -> [b * num_heads, hn, lin_k]
+            value_layer_chunks = torch.chunk(value_layer, self.num_attention_heads, dim=1)
+            value_layer = torch.cat(
+                tuple(self.value_projections[i](chunk)[0] for i, chunk in enumerate(value_layer_chunks)),
+                dim=1
+            )
+            value_layer = value_layer.view(output_size[0] * output_size[1], value_layer.size(2), value_layer.size(3))
+
+        # # change view [b * num_heads, sq, lin_k]
         attention_probs = attention_probs.view(attention_probs.size(0) * attention_probs.size(1),
                                                attention_probs.size(2),
                                                attention_probs.size(3))
@@ -861,7 +891,7 @@ class LinformerRingParallelAttention(MegatronModule):
         # matmul: [b*num_heads, sq, hn]
         # context_layer = torch.bmm(attention_probs, value_layer.transpose(0, 1))
         context_layer = mpu.LinformerRingAV.apply(
-            attention_probs, # [b * num_heads, sq, sk]
+            attention_probs, # [b * num_heads, sq, lin_k]
             value_layer.transpose(2, 1).contiguous() # [b * num_heads, lin_k, hn]
         )
 
@@ -1307,7 +1337,7 @@ class ParallelTransformerLayer(MegatronModule):
             self.self_attention = LinformerRingParallelAttention(
                 init_method,
                 output_layer_init_method,
-                torch.nn.init.xavier_normal_,
+                init_method,
                 layer_number,
                 attention_type=AttnType.self_attn,
                 attn_mask_type=self_attn_mask_type

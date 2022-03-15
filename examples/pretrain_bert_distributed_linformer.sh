@@ -1,10 +1,9 @@
 #!/bin/bash
 
-GPUS_PER_NODE=4
+GPUS_PER_NODE=$TENSOR_PARALLEL_SIZE
 # Change for multinode config
 MASTER_ADDR=localhost
 MASTER_PORT=6000
-NNODES=1
 NODE_RANK=0
 WORLD_SIZE=$(($GPUS_PER_NODE*$NNODES))
 
@@ -18,6 +17,7 @@ python -m torch.distributed.launch $DISTRIBUTED_ARGS \
        pretrain_bert.py \
        --tensor-model-parallel-size $TENSOR_PARALLEL_SIZE \
        --linformer-k $LINFORMER_K \
+       --share-heads \
        --num-layers $NUM_LAYERS \
        --hidden-size $HIDDEN_SIZE \
        --num-attention-heads $NUM_HEADS \

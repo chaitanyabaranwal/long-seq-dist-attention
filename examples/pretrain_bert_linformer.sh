@@ -8,6 +8,7 @@ VOCAB_PATH=../vocab/bert-large-uncased-vocab.txt
 
 python pretrain_bert.py \
        --linformer-k $LINFORMER_K \
+       --share-heads \
        --num-layers $NUM_LAYERS \
        --hidden-size $HIDDEN_SIZE \
        --num-attention-heads $NUM_HEADS \
