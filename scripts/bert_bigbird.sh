@@ -9,11 +9,11 @@ tensor=${3:-"4"}
 seq=${4:-"512"}
 mic_bs=${5:-"8"}
 glb_bs=${6:-"8"}
-block_size=${7:-"32"}
+block_size=${7:-"3264"}
 layer=${8:-"12"}
 hidden=${9:-"768"}
 heads=${10:-"12"}
-iters=${11:-"1010"}
+iters=${11:-"510"}
 
 #python ./scripts/get_host_ip_addr.py > "./HOST"
 #ADDR=`cat ./HOST`
