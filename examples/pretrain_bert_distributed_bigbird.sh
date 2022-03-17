@@ -1,12 +1,7 @@
 #!/bin/bash
 
-module load daint-gpu
-module load PyTorch
-
 # Change for multinode config
 GPUS_PER_NODE=1
-MASTER_ADDR=$1
-MASTER_PORT=$2
 NODE_RANK=$SLURM_NODEID
 WORLD_SIZE=$(($GPUS_PER_NODE*$NNODES))
 

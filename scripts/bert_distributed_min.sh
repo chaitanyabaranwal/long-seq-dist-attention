@@ -1,5 +1,8 @@
 #!/bin/bash
 
+module load daint-gpu
+module load PyTorch
+
 np=${1:-"1"}
 pipeline=${2:-"1"}
 tensor=${3:-"4"}
@@ -13,6 +16,8 @@ iters=${10:-"210"}
 
 python ./scripts/get_host_ip_addr.py > "./HOST"
 ADDR=`cat ./HOST`
+export MASTER_ADDR=$ADDR
+export MASTER_PORT=29500
 export PIPELINE_PARALLEL_SIZE=$pipeline
 export TENSOR_PARALLEL_SIZE=$tensor
 export NNODES=$np
@@ -24,4 +29,4 @@ export HIDDEN_SIZE=$hidden
 export NUM_HEADS=$heads
 export TRAIN_ITERS=$iters
 
-srun bash ./examples/pretrain_bert_distributed.sh $ADDR 29500
+srun bash ./examples/pretrain_bert_distributed.sh
