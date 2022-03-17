@@ -1,10 +1,13 @@
 #!/bin/bash
 
-GPUS_PER_NODE=$TENSOR_PARALLEL_SIZE
+module load daint-gpu
+module load PyTorch
+
 # Change for multinode config
-MASTER_ADDR=localhost
-MASTER_PORT=6000
-NODE_RANK=0
+GPUS_PER_NODE=1
+MASTER_ADDR=$1
+MASTER_PORT=$2
+NODE_RANK=$SLURM_NODEID
 WORLD_SIZE=$(($GPUS_PER_NODE*$NNODES))
 
 DATA_PATH=../data/bert/my-bert_text_sentence

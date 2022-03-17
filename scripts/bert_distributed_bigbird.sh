@@ -1,8 +1,5 @@
 #!/bin/bash
 
-module load cuda/11.1.1-gcc-9.3.0
-module load nccl
-
 np=${1:-"1"}
 pipeline=${2:-"1"}
 tensor=${3:-"4"}
@@ -15,10 +12,8 @@ hidden=${9:-"768"}
 heads=${10:-"12"}
 iters=${11:-"50000"}
 
-#python ./scripts/get_host_ip_addr.py > "./HOST"
-#ADDR=`cat ./HOST`
-export MASTER_ADDR=localhost
-export MASTER_PORT=6000
+python ./scripts/get_host_ip_addr.py > "./HOST"
+ADDR=`cat ./HOST`
 export PIPELINE_PARALLEL_SIZE=$pipeline
 export TENSOR_PARALLEL_SIZE=$tensor
 export NNODES=$np
@@ -31,4 +26,4 @@ export NUM_HEADS=$heads
 export TRAIN_ITERS=$iters
 export BLOCK_SIZE=$block_size
 
-bash ./examples/pretrain_bert_distributed_bigbird.sh
+srun bash ./examples/pretrain_bert_distributed_bigbird.sh $ADDR 29500
