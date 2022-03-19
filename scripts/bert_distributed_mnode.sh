@@ -6,13 +6,13 @@ module load PyTorch
 np=${1:-"1"}
 pipeline=${2:-"1"}
 tensor=${3:-"4"}
-seq=${4:-"512"}
-mic_bs=${5:-"64"}
-glb_bs=${6:-"64"}
-layer=${7:-"12"}
-hidden=${8:-"768"}
-heads=${9:-"12"}
-iters=${10:-"50000"}
+seq=${4:-"128"}
+mic_bs=${5:-"8"}
+glb_bs=${6:-"8"}
+layer=${7:-"2"}
+hidden=${8:-"256"}
+heads=${9:-"8"}
+iters=${10:-"110"}
 
 python ./scripts/get_host_ip_addr.py > "./HOST"
 ADDR=`cat ./HOST`

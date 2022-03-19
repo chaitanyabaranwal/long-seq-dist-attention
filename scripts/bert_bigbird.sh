@@ -13,7 +13,7 @@ block_size=${7:-"3264"}
 layer=${8:-"12"}
 hidden=${9:-"768"}
 heads=${10:-"12"}
-iters=${11:-"210"}
+iters=${11:-"110"}
 
 python ./scripts/get_host_ip_addr.py > "./HOST"
 ADDR=`cat ./HOST`
