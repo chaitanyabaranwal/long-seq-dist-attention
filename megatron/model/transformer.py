@@ -1212,8 +1212,8 @@ class BigBirdRingParallelAttention(MegatronModule):
         rank = get_tensor_model_parallel_rank()
         start_block, end_block = (self.sub_seq_length * rank) // self.block_size, ((self.sub_seq_length * (rank + 1)) // self.block_size) - 1
 
-        first_band = torch.diagonal(attention_mask_reshape[:, :, :, start_block:(end_block + 1)], dim1=2, dim2=3).reshape(*band_shape)
-        second_band = torch.diagonal(torch.roll(attention_mask_reshape, 1, 3)[:, :, :, start_block:(end_block + 1)], dim1=2, dim2=3).reshape(*band_shape)
+        first_band = torch.diagonal(torch.roll(attention_mask_reshape, 1, 3)[:, :, :, start_block:(end_block + 1)], dim1=2, dim2=3).reshape(*band_shape)
+        second_band = torch.diagonal(attention_mask_reshape[:, :, :, start_block:(end_block + 1)], dim1=2, dim2=3).reshape(*band_shape)
         third_band = torch.diagonal(torch.roll(attention_mask_reshape, -1, 3)[:, :, :, start_block:(end_block + 1)], dim1=2, dim2=3).reshape(*band_shape)
 
         return torch.cat(
