@@ -39,11 +39,12 @@ python -m torch.distributed.launch $DISTRIBUTED_ARGS \
        --lr-warmup-fraction .01 \
        --weight-decay 1e-2 \
        --clip-grad 1.0 \
-       --log-interval 10 \
+       --log-interval 100 \
        --save-interval 10000 \
        --eval-interval 1000 \
        --eval-iters 10 \
        --fp16 \
+       --attention-dropout 0.0 \
        --exp
 
 rm -rf ./checkpoints/*

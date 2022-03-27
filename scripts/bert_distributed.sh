@@ -6,13 +6,13 @@ module load nccl
 np=${1:-"1"}
 pipeline=${2:-"1"}
 tensor=${3:-"4"}
-seq=${4:-"512"}
+seq=${4:-"1024"}
 mic_bs=${5:-"8"}
 glb_bs=${6:-"8"}
 layer=${7:-"12"}
 hidden=${8:-"768"}
 heads=${9:-"12"}
-iters=${10:-"210"}
+iters=${10:-"70000"}
 
 #python ./scripts/get_host_ip_addr.py > "./HOST"
 #ADDR=`cat ./HOST`
