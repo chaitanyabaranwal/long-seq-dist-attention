@@ -41,6 +41,7 @@ python -m torch.distributed.launch $DISTRIBUTED_ARGS \
        --save-interval 10000 \
        --eval-interval 1000 \
        --eval-iters 10 \
+       --attention-dropout 0.0 \
        --fp16 \
        --bert-no-binary-head \
        --exp
