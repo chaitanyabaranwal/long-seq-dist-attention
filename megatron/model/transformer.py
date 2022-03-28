@@ -1337,7 +1337,7 @@ class ParallelTransformerLayer(MegatronModule):
             self.self_attention = LinformerRingParallelAttention(
                 init_method,
                 output_layer_init_method,
-                output_layer_init_method,
+                init_method,
                 layer_number,
                 attention_type=AttnType.self_attn,
                 attn_mask_type=self_attn_mask_type
