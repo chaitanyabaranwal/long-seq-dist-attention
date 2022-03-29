@@ -741,6 +741,7 @@ class LinformerRingQK(torch.autograd.Function):
 
         # calculate gradient of sub_k
         grad_k = torch.matmul(sub_q.transpose(2, 1), grad_output)
+        torch.distributed.all_reduce(grad_k, group=get_tensor_model_parallel_group())
 
         return grad_q, grad_k
 
@@ -785,6 +786,7 @@ class LinformerRingAV(torch.autograd.Function):
 
         # calculate gradient of sub_k
         grad_v = torch.matmul(attention_score.transpose(2, 1), grad_output)
+        torch.distributed.all_reduce(grad_v, group=get_tensor_model_parallel_group())
 
         return grad_attention_score, grad_v
 

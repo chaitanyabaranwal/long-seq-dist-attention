@@ -2,6 +2,7 @@ import torch
 import torch.distributed as dist
 import torch.multiprocessing as mp
 import os
+import copy
 
 from functools import partial
 
@@ -50,6 +51,7 @@ class LinformerRingQK(torch.autograd.Function):
 
         # calculate gradient of sub_k
         grad_k = torch.matmul(sub_q.transpose(2, 1), grad_output)
+        dist.all_reduce(grad_k)
 
         return grad_q, grad_k
 
@@ -89,6 +91,7 @@ class LinformerRingAV(torch.autograd.Function):
 
         # calculate gradient of sub_k
         grad_v = torch.matmul(attention_score.transpose(2, 1), grad_output)
+        dist.all_reduce(grad_v)
 
         return grad_attention_score, grad_v
 
@@ -96,14 +99,25 @@ def check_linformer_ring_qk(rank, world_size):
     # create master tensors
     q = torch.rand(batch_size*num_heads, seq_length, attention_head_size, dtype=torch.float64).cuda()
     dist.broadcast(q, src=0)
-    sub_k = torch.rand(batch_size*num_heads, attention_head_size, linformer_k, dtype=torch.float64).cuda()
-    k = sub_k.clone().detach()
-    dist.all_reduce(k)
+    k = torch.rand(batch_size*num_heads, seq_length, attention_head_size, dtype=torch.float64).cuda()
+    dist.broadcast(k, src=0)
+    param = torch.rand(linformer_k, seq_length, dtype=torch.float64).cuda()
+    parameter = torch.nn.Parameter(param)
+    dist.broadcast(param, src=0)
 
     # create distributed tensors
-    sub_q = q.clone()[:, rank*sub_seq_length:(rank+1)*sub_seq_length].contiguous()
+    sub_q = q.clone()[:, rank*sub_seq_length:(rank+1)*sub_seq_length].detach()
+    sub_k = k.clone()[:, rank*sub_seq_length:(rank+1)*sub_seq_length].detach()
+    sub_param = param.clone()[:, rank*sub_seq_length:(rank+1)*sub_seq_length].detach()
+    sub_parameter = torch.nn.Parameter(sub_param)
+    sub_proj_k = torch.nn.functional.linear(sub_k.transpose(2, 1), sub_parameter)
+    sub_proj_k_master = torch.nn.functional.linear(k.transpose(2, 1), parameter)
 
     # set autograd attributes
+    parameter.requires_grad = True
+    parameter.retain_grad()
+    sub_parameter.requires_grad = True
+    sub_parameter.retain_grad()
     q.requires_grad = True
     k.requires_grad = True
     q.retain_grad()
@@ -112,16 +126,18 @@ def check_linformer_ring_qk(rank, world_size):
     sub_k.requires_grad = True
     sub_q.retain_grad()
     sub_k.retain_grad()
-
-    # compute master attention scores
-    a = torch.matmul(q, k)
+    sub_proj_k.retain_grad()
+    sub_proj_k_master.retain_grad()
 
     # compute distributed attention scores
-    sub_a = LinformerRingQK.apply(sub_q, sub_k)
+    sub_a = LinformerRingQK.apply(sub_q, sub_proj_k)
+    
+    # compute master attention scores
+    a = torch.matmul(q, sub_proj_k_master)
 
     # check master and distributed attention scores
     sub_master_a = a[:, rank*sub_seq_length:(rank+1)*sub_seq_length]
-    assert torch.allclose(sub_a, sub_master_a, rtol=1e-5, atol=1e-2), \
+    assert torch.allclose(sub_a, sub_master_a, rtol=1e-5, atol=1e-8), \
         'attention score does not match'
 
     # run master backward
@@ -136,32 +152,45 @@ def check_linformer_ring_qk(rank, world_size):
     partial_master_q_grad = q.grad[:, rank*sub_seq_length:(rank+1)*sub_seq_length]
     assert torch.allclose(sub_q.grad, partial_master_q_grad, rtol=1e-5, atol=1e-2), \
         'partial Q gradient does not match'
-    sub_k_grad = sub_k.grad.clone()
-    dist.all_reduce(sub_k_grad)
-    assert torch.allclose(sub_k_grad, k.grad, rtol=1e-5, atol=1e-2), \
-        'sum of partial K gradients does not match master K gradient'
+    
+    sub_proj_k_all_grad = sub_proj_k.grad.clone()
+    dist.all_reduce(sub_proj_k_all_grad)
+    assert torch.allclose(sub_proj_k_all_grad, sub_proj_k_master.grad, rtol=1e-5, atol=1e-2), \
+        'sum of partial K projected gradients does not match master K projected gradient'
 
+    partial_master_param_grad = parameter.grad[:, rank*sub_seq_length:(rank+1)*sub_seq_length]
+    assert torch.allclose(partial_master_param_grad, sub_parameter.grad, rtol=1e-5, atol=1e-8), \
+        'partial parameter gradient does not match'
+
+    partial_master_param = parameter[:, rank*sub_seq_length:(rank+1)*sub_seq_length]
+    partial_master_k_grad = torch.matmul(sub_proj_k_master.grad, partial_master_param)
+    sub_k_grad = torch.matmul(sub_proj_k.grad, sub_parameter)
+    assert torch.allclose(sub_k_grad, partial_master_k_grad, rtol=1e-5, atol=1e-8), \
+        f'partial K gradient does not match'
 
 def check_linformer_ring_av(rank, world_size):
-    # params
-    batch_size = 4
-    num_heads = 4
-    seq_length = 64
-    attention_head_size = 64
-    sub_seq_length = seq_length // world_size
-    linformer_k = 32
-
     # create master tensors
     a = torch.rand(batch_size*num_heads, seq_length, linformer_k, dtype=torch.float64).cuda()
     dist.broadcast(a, src=0)
-    sub_v = torch.rand(batch_size*num_heads, linformer_k, attention_head_size, dtype=torch.float64).cuda()
-    v = sub_v.clone().detach()
-    dist.all_reduce(v)
+    v = torch.rand(batch_size*num_heads, seq_length, attention_head_size, dtype=torch.float64).cuda()
+    dist.broadcast(v, src=0)
+    param = torch.rand(linformer_k, seq_length, dtype=torch.float64).cuda()
+    parameter = torch.nn.Parameter(param)
+    dist.broadcast(param, src=0)
 
     # create distributed tensors
-    sub_a = a.clone()[:, rank*sub_seq_length:(rank+1)*sub_seq_length].contiguous()
+    sub_a = a.clone()[:, rank*sub_seq_length:(rank+1)*sub_seq_length].detach()
+    sub_v = v.clone()[:, rank*sub_seq_length:(rank+1)*sub_seq_length].detach()
+    sub_param = param.clone()[:, rank*sub_seq_length:(rank+1)*sub_seq_length].detach()
+    sub_parameter = torch.nn.Parameter(sub_param)
+    sub_proj_v = torch.nn.functional.linear(sub_v.transpose(2, 1), sub_parameter)
+    sub_proj_v_master = torch.nn.functional.linear(v.transpose(2, 1), parameter)
 
     # set autograd attributes
+    parameter.requires_grad = True
+    parameter.retain_grad()
+    sub_parameter.requires_grad = True
+    sub_parameter.retain_grad()
     a.requires_grad = True
     v.requires_grad = True
     a.retain_grad()
@@ -170,16 +199,18 @@ def check_linformer_ring_av(rank, world_size):
     sub_v.requires_grad = True
     sub_a.retain_grad()
     sub_v.retain_grad()
-
-    # compute master attention scores
-    out = torch.matmul(a, v)
+    sub_proj_v.retain_grad()
+    sub_proj_v_master.retain_grad()
 
     # compute distributed attention scores
-    sub_out = LinformerRingAV.apply(sub_a, sub_v)
+    sub_out = LinformerRingAV.apply(sub_a, sub_proj_v.transpose(2, 1))
+
+    # compute master attention scores
+    out = torch.matmul(a, sub_proj_v_master.transpose(2, 1))
 
     # check master and distributed attention scores
     sub_master_out = out[:, rank*sub_seq_length:(rank+1)*sub_seq_length]
-    assert torch.allclose(sub_out, sub_master_out, rtol=1e-5, atol=1e-2), \
+    assert torch.allclose(sub_out, sub_master_out, rtol=1e-5, atol=1e-8), \
         'output score does not match'
 
     # run master backward
@@ -194,15 +225,26 @@ def check_linformer_ring_av(rank, world_size):
     partial_master_a_grad = a.grad[:, rank*sub_seq_length:(rank+1)*sub_seq_length]
     assert torch.allclose(sub_a.grad, partial_master_a_grad, rtol=1e-5, atol=1e-2), \
         'partial A gradient does not match'
-    sub_v_grad = sub_v.grad.clone()
-    dist.all_reduce(sub_v_grad)
-    assert torch.allclose(sub_v_grad, v.grad, rtol=1e-5, atol=1e-2), \
-        'sum of partial V gradients does not match master V gradient'
+    
+    sub_proj_v_all_grad = sub_proj_v.grad.clone()
+    dist.all_reduce(sub_proj_v_all_grad)
+    assert torch.allclose(sub_proj_v_all_grad, sub_proj_v_master.grad, rtol=1e-5, atol=1e-2), \
+        'sum of partial V projected gradients does not match master V projected gradient'
+
+    partial_master_param_grad = parameter.grad[:, rank*sub_seq_length:(rank+1)*sub_seq_length]
+    assert torch.allclose(partial_master_param_grad, sub_parameter.grad, rtol=1e-5, atol=1e-8), \
+        'partial parameter gradient does not match'
+
+    partial_master_param = parameter[:, rank*sub_seq_length:(rank+1)*sub_seq_length]
+    partial_master_v_grad = torch.matmul(sub_proj_v_master.grad, partial_master_param)
+    sub_v_grad = torch.matmul(sub_proj_v.grad, sub_parameter)
+    assert torch.allclose(sub_v_grad, partial_master_v_grad, rtol=1e-5, atol=1e-8), \
+        f'partial V gradient does not match'
 
 
 def run_test(rank, world_size):
     os.environ['MASTER_ADDR'] = 'localhost'
-    os.environ['MASTER_PORT'] = '29100'
+    os.environ['MASTER_PORT'] = '29500'
 
     # how to initialize?
     dist.init_process_group(

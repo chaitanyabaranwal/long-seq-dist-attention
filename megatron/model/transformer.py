@@ -839,14 +839,11 @@ class LinformerRingParallelAttention(MegatronModule):
         # ===========================
 
         # attention scores and attention mask [b, num_heads, sq, lin_k]
-        attention_mask = attention_mask.broadcast_to(
-            attention_mask.size(0),
-            attention_mask.size(1),
-            attention_mask.size(2),
-            self.linformer_k
+        attention_mask = torch.broadcast_to(
+            attention_mask,
+            (attention_mask.size(0), attention_mask.size(1), attention_mask.size(2), self.linformer_k)
         ).contiguous()
-        attention_probs = self.scale_mask_softmax(attention_scores,
-                                                  attention_mask)
+        attention_probs = self.scale_mask_softmax(attention_scores, attention_mask)
 
         # This is actually dropping out entire tokens to attend to, which might
         # seem a bit unusual, but is taken from the original Transformer paper.

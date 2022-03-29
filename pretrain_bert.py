@@ -110,9 +110,6 @@ def get_batch(data_iterator):
 def loss_func(loss_mask, sentence_order, output_tensor):
     lm_loss_, sop_logits = output_tensor
 
-    if torch.isnan(sop_logits).any() or torch.isnan(lm_loss_).any():
-        print(f'lm_loss_ is {lm_loss_}, sop_logits: {sop_logits}')
-
     lm_loss_ = lm_loss_.float()
     loss_mask = loss_mask.float()
     loss_mask_sum = loss_mask.sum()

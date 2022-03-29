@@ -44,6 +44,7 @@ python -m torch.distributed.launch $DISTRIBUTED_ARGS \
        --eval-interval 1000 \
        --eval-iters 10 \
        --fp16 \
+       --bert-no-binary-head \
        --exp
 
 rm -rf ./checkpoints/*

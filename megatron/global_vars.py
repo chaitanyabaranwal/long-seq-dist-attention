@@ -111,6 +111,8 @@ def _handle_experiment_logs(args):
     )
     if args.linformer_k:
         exp_name += '_linformer{}'.format(args.linformer_k)
+        if args.share_heads:
+            exp_name += 'shareheads'
     if args.bigbird:
         exp_name += '_bigbird{}'.format(args.block_size)
 

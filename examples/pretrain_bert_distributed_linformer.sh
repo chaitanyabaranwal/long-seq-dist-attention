@@ -3,7 +3,7 @@
 GPUS_PER_NODE=$TENSOR_PARALLEL_SIZE
 # Change for multinode config
 MASTER_ADDR=localhost
-MASTER_PORT=6000
+MASTER_PORT=29100
 NODE_RANK=0
 WORLD_SIZE=$(($GPUS_PER_NODE*$NNODES))
 
@@ -44,7 +44,7 @@ python -m torch.distributed.launch $DISTRIBUTED_ARGS \
        --eval-interval 1000 \
        --eval-iters 10 \
        --fp16 \
-       --attention-dropout 0.0 \
+       --bert-no-binary-head \
        --exp
 
 rm -rf ./checkpoints/*
