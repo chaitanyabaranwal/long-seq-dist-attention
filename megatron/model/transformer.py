@@ -17,8 +17,10 @@
 import math
 import torch
 import torch.nn.functional as F
+import torch.distributed.nn
 
 from megatron.mpu.initialize import get_tensor_model_parallel_rank
+from megatron.mpu.initialize import get_tensor_model_parallel_group
 from megatron import get_args
 from megatron import mpu
 from .module import MegatronModule
@@ -824,11 +826,12 @@ class LinformerRingParallelAttention(MegatronModule):
             )
             key_layer = key_layer.view(output_size[0] * output_size[1], key_layer.size(2), key_layer.size(3))
 
-        # [b, sq, sk]
-        attention_scores = mpu.LinformerRingQK.apply(
-            query_layer.transpose(0, 1).contiguous(), # [b * num_heads, sq, hn]
-            key_layer.contiguous() # [b * num_heads, hn, lin_k]
-        )
+        # collect all the projected key matrices into one
+        torch.distributed.nn.all_reduce(key_layer, group=get_tensor_model_parallel_group())
+
+        # compute local QK^T
+        # [b * num_heads, sq, lin_k]
+        attention_scores = torch.matmul(query_layer.transpose(0, 1), key_layer)
         attention_scores /= self.norm_factor
 
         # change view to [b, num_heads, sq, lin_k]
@@ -885,12 +888,14 @@ class LinformerRingParallelAttention(MegatronModule):
                                                attention_probs.size(2),
                                                attention_probs.size(3))
 
-        # matmul: [b*num_heads, sq, hn]
-        # context_layer = torch.bmm(attention_probs, value_layer.transpose(0, 1))
-        context_layer = mpu.LinformerRingAV.apply(
-            attention_probs, # [b * num_heads, sq, lin_k]
-            value_layer.transpose(2, 1).contiguous() # [b * num_heads, lin_k, hn]
-        )
+        # collect all the projected value matrices into one
+        # [b * num_heads, hn, lin_k] -> [b * num_heads, lin_k, hn]
+        value_layer = value_layer.transpose(2, 1)
+        torch.distributed.nn.all_reduce(value_layer, group=get_tensor_model_parallel_group())
+
+        # compute local AV
+        # [b * num_heads, sq, hn]
+        context_layer = torch.matmul(attention_probs, value_layer)
 
         # # change view [b, num_heads, sq, hn]
         context_layer = context_layer.view(*output_size)
