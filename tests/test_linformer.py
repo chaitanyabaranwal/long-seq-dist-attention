@@ -150,22 +150,17 @@ def check_linformer_ring_qk(rank, world_size):
 
     # check master and distributed grads
     partial_master_q_grad = q.grad[:, rank*sub_seq_length:(rank+1)*sub_seq_length]
-    assert torch.allclose(sub_q.grad, partial_master_q_grad, rtol=1e-5, atol=1e-2), \
+    assert torch.allclose(sub_q.grad, partial_master_q_grad, rtol=1e-5), \
         'partial Q gradient does not match'
-    
-    sub_proj_k_all_grad = sub_proj_k.grad.clone()
-    dist.all_reduce(sub_proj_k_all_grad)
-    assert torch.allclose(sub_proj_k_all_grad, sub_proj_k_master.grad, rtol=1e-5, atol=1e-2), \
-        'sum of partial K projected gradients does not match master K projected gradient'
 
     partial_master_param_grad = parameter.grad[:, rank*sub_seq_length:(rank+1)*sub_seq_length]
-    assert torch.allclose(partial_master_param_grad, sub_parameter.grad, rtol=1e-5, atol=1e-8), \
+    assert torch.allclose(partial_master_param_grad, sub_parameter.grad, rtol=1e-5), \
         'partial parameter gradient does not match'
 
     partial_master_k_grad = torch.matmul(sub_proj_k_master.grad, parameter)[:, :, rank*sub_seq_length:(rank+1)*sub_seq_length]
     sub_k_grad = torch.matmul(sub_proj_k.grad, sub_parameter)
-    assert torch.allclose(sub_k_grad, partial_master_k_grad, rtol=1e-5, atol=1e-8), \
-        f'partial K gradient does not match'
+    assert torch.allclose(sub_k_grad, partial_master_k_grad, rtol=1e-5), \
+        'partial K gradient does not match'
 
 def check_linformer_ring_av(rank, world_size):
     # create master tensors
@@ -222,22 +217,17 @@ def check_linformer_ring_av(rank, world_size):
 
     # check master and distributed grads
     partial_master_a_grad = a.grad[:, rank*sub_seq_length:(rank+1)*sub_seq_length]
-    assert torch.allclose(sub_a.grad, partial_master_a_grad, rtol=1e-5, atol=1e-2), \
+    assert torch.allclose(sub_a.grad, partial_master_a_grad, rtol=1e-5), \
         'partial A gradient does not match'
-    
-    sub_proj_v_all_grad = sub_proj_v.grad.clone()
-    dist.all_reduce(sub_proj_v_all_grad)
-    assert torch.allclose(sub_proj_v_all_grad, sub_proj_v_master.grad, rtol=1e-5, atol=1e-2), \
-        'sum of partial V projected gradients does not match master V projected gradient'
 
     partial_master_param_grad = parameter.grad[:, rank*sub_seq_length:(rank+1)*sub_seq_length]
-    assert torch.allclose(partial_master_param_grad, sub_parameter.grad, rtol=1e-5, atol=1e-8), \
+    assert torch.allclose(partial_master_param_grad, sub_parameter.grad, rtol=1e-5), \
         'partial parameter gradient does not match'
 
     partial_master_v_grad = torch.matmul(sub_proj_v_master.grad, parameter)[:, :, rank*sub_seq_length:(rank+1)*sub_seq_length]
     sub_v_grad = torch.matmul(sub_proj_v.grad, sub_parameter)
-    assert torch.allclose(sub_v_grad, partial_master_v_grad, rtol=1e-5, atol=1e-8), \
-        f'partial V gradient does not match'
+    assert torch.allclose(sub_v_grad, partial_master_v_grad, rtol=1e-5), \
+        'partial V gradient does not match'
 
 
 def run_test(rank, world_size):

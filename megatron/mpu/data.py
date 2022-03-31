@@ -14,6 +14,7 @@
 # limitations under the License.
 
 import torch
+import random
 
 from .initialize import get_tensor_model_parallel_group
 from .initialize import get_tensor_model_parallel_rank
@@ -31,20 +32,27 @@ def _check_data_types(keys, data, target_dtype):
             'is different than {}'.format(key, data[key].dtype, target_dtype)
 
 
-def _build_key_size_numel_dictionaries(keys, data):
+def _build_key_size_numel_dictionaries(keys, data, bigbird=False, total_blocks=None, num_random_blocks=None):
     """Build the size on rank 0 and broadcast."""
     max_dim = _MAX_DATA_DIM
     sizes = [0 for _ in range(max_dim) for _ in keys]
+    if bigbird:
+        assert keys[-1] == 'bigbird_random', 'Need Big Bird key if enabled'
 
     # Pack the sizes on rank zero.
     if get_tensor_model_parallel_rank() == 0:
+        if bigbird:
+            assert total_blocks is not None and num_random_blocks is not None, 'total blocks and random blocks needed'
+            mapping = get_bigbird_random_block_mapping(total_blocks, num_random_blocks)
+            data['bigbird_random'] = mapping
+
         offset = 0
         for key in keys:
             assert data[key].dim() < max_dim, 'you should increase MAX_DATA_DIM'
             size = data[key].size()
             for i, s in enumerate(size):
                 sizes[i + offset] = s
-            offset += max_dim
+            offset += max_dim  
 
     # Move to GPU and broadcast.
     sizes_cuda = torch.cuda.LongTensor(sizes)
@@ -73,8 +81,31 @@ def _build_key_size_numel_dictionaries(keys, data):
 
     return key_size, key_numel, total_numel
 
+def get_bigbird_random_block_mapping(total_blocks, num_random_blocks):
+    '''
+    Gets a tensor mapping each block to its two random blocks, and the blocks which use current block.
+    '''
+    # Create list values
+    final_map = []
+    for i in range(total_blocks):
+        if i == 0:
+            invalid_vals = [0, 1, total_blocks - 1]
+        elif i == 1:
+            invalid_vals = [0, 1, 2, total_blocks - 1]
+        elif i == total_blocks - 2:
+            invalid_vals = [total_blocks - 3, total_blocks - 2, total_blocks - 1, 0]
+        elif i == total_blocks - 1:
+            invalid_vals = [total_blocks - 2, total_blocks - 1, 0]
+        else:
+            invalid_vals = [0, i - 1, i, i + 1, total_blocks - 1]
+        valid_vals = list(set(range(total_blocks)) - set(invalid_vals))
+        blocks = random.sample(valid_vals, num_random_blocks)
+        final_map.append(blocks)
 
-def broadcast_data(keys, data, datatype):
+    # Copy to tensor
+    return torch.LongTensor(final_map)
+
+def broadcast_data(keys, data, datatype, bigbird=False, total_blocks=None, num_random_blocks=None):
     """Broadcast data from rank zero of each model parallel group to the
     members of the same model parallel group.
 
@@ -86,8 +117,10 @@ def broadcast_data(keys, data, datatype):
     """
     # Build (key, size) and (key, number of elements) dictionaries along
     # with the total number of elements on all ranks.
-    key_size, key_numel, total_numel = _build_key_size_numel_dictionaries(keys,
-                                                                          data)
+    key_size, key_numel, total_numel = _build_key_size_numel_dictionaries(
+        keys, data,
+        bigbird, total_blocks, num_random_blocks
+    )
 
     # Pack on rank zero.
     if get_tensor_model_parallel_rank() == 0:

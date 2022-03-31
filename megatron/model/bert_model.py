@@ -211,7 +211,7 @@ class BertModel(MegatronModule):
         self.language_model.set_input_tensor(input_tensor)
 
     def forward(self, bert_model_input, attention_mask,
-                tokentype_ids=None, lm_labels=None):
+                tokentype_ids=None, lm_labels=None, bigbird_random=None):
 
         extended_attention_mask = bert_extended_attention_mask(attention_mask)
         input_ids = bert_model_input
@@ -221,7 +221,8 @@ class BertModel(MegatronModule):
             input_ids,
             position_ids,
             extended_attention_mask,
-            tokentype_ids=tokentype_ids
+            tokentype_ids=tokentype_ids,
+            bigbird_random=bigbird_random
         )
 
         if self.post_process and self.add_binary_head:

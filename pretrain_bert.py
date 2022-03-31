@@ -56,6 +56,8 @@ def get_batch(data_iterator):
 
     # Items and their type.
     keys = ['text', 'types', 'labels', 'is_random', 'loss_mask', 'padding_mask']
+    if args.bigbird:
+        keys.append('bigbird_random')
     datatype = torch.int64
 
     # Broadcast data.
@@ -78,8 +80,12 @@ def get_batch(data_iterator):
     ####################################
     # NOTE: for RingParallelAttention  #
     ####################################
-    # unpack
-    data_b = mpu.broadcast_data(keys, data, datatype)
+    if args.bigbird:
+        total_blocks = args.seq_length // args.block_size
+        # TODO: Make num_random_blocks an arg too
+        data_b = mpu.broadcast_data(keys, data, datatype, bigbird=True, total_blocks=total_blocks, num_random_blocks=2)
+    else:
+        data_b = mpu.broadcast_data(keys, data, datatype)
 
     # # get tensor parallel local rank
     global_rank = torch.distributed.get_rank()
@@ -89,13 +95,14 @@ def get_batch(data_iterator):
     sub_seq_length = seq_length // local_world_size
     sub_seq_start = local_rank * sub_seq_length
     sub_seq_end = (local_rank+1) * sub_seq_length
-    #
+
     # # Unpack.
     tokens = data_b['text'][:, sub_seq_start:sub_seq_end].long().clone()
     types = data_b['types'][:, sub_seq_start:sub_seq_end].long()
     sentence_order = data_b['is_random'].long()
     loss_mask = data_b['loss_mask'][:, sub_seq_start:sub_seq_end].float()
     lm_labels = data_b['labels'][:, sub_seq_start:sub_seq_end].long()
+
     # If Linformer is enabled, that means the masking mechanism is different, 
     # since instead of the attention matrix the K and V matrices are masked 
     # individually. So we only need part of the padding mask.
@@ -103,8 +110,14 @@ def get_batch(data_iterator):
         padding_mask = data_b['padding_mask'][:, sub_seq_start:sub_seq_end].long()
     else:
         padding_mask = data_b['padding_mask'].long()
+    
+    # If Big Bird is enabled, get the random block mapping as part of the data
+    if args.bigbird:
+        bigbird_random = data_b['bigbird_random'][(sub_seq_start // args.block_size):(sub_seq_end // args.block_size)].long()
+    else:
+        bigbird_random = None
 
-    return tokens, types, sentence_order, loss_mask, lm_labels, padding_mask
+    return tokens, types, sentence_order, loss_mask, lm_labels, padding_mask, bigbird_random
 
 
 def loss_func(loss_mask, sentence_order, output_tensor):
@@ -157,7 +170,7 @@ def forward_step(data_iterator, model):
 
     # Get the batch.
     timers('batch-generator').start()
-    tokens, types, sentence_order, loss_mask, lm_labels, padding_mask = get_batch(
+    tokens, types, sentence_order, loss_mask, lm_labels, padding_mask, bigbird_random = get_batch(
         data_iterator)
     timers('batch-generator').stop()
 
@@ -166,7 +179,8 @@ def forward_step(data_iterator, model):
 
     # Forward pass through the model.
     output_tensor = model(tokens, padding_mask, tokentype_ids=types,
-                          lm_labels=lm_labels)
+                          lm_labels=lm_labels,
+                          bigbird_random=bigbird_random)
 
     return output_tensor, partial(loss_func, loss_mask, sentence_order)
 

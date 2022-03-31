@@ -1010,7 +1010,8 @@ class BigBirdRingParallelAttention(MegatronModule):
             skip_bias_add=True)
 
     def forward(self, hidden_states, attention_mask, layer_past=None,
-                get_key_value=False, encoder_output=None):
+                get_key_value=False, encoder_output=None,
+                random_mapping=None):
         # hidden_states: [sq, b, h]
 
         # =====================
@@ -1064,7 +1065,7 @@ class BigBirdRingParallelAttention(MegatronModule):
             query_layer.size(1),
             query_layer.size(2),
             local_blocks * self.block_size,
-            5 * self.block_size
+            7 * self.block_size
         )
 
         # [sq, b, num_heads, hn] -> [b * num_heads, local_blocks, block_size, hn]
@@ -1081,7 +1082,8 @@ class BigBirdRingParallelAttention(MegatronModule):
 
         first_product, inner_product, last_product = mpu.BigBirdRingQK.apply(
             query_layer.contiguous(), # [b * num_heads, local_blocks, block_size, hn]
-            key_layer.contiguous() # [b * num_heads, local_blocks, block_size, hn]
+            key_layer.contiguous(), # [b * num_heads, local_blocks, block_size, hn]
+            random_mapping
         )
         if first_product is not None:
             first_product /= self.norm_factor
@@ -1112,7 +1114,7 @@ class BigBirdRingParallelAttention(MegatronModule):
             self.block_size,
             self.seq_length
         ) if last_product is not None else None
-        attention_mask = self.get_attention_mask(attention_mask, local_blocks, self.seq_length // self.block_size, self.block_size)
+        attention_mask = self.get_attention_mask(attention_mask, local_blocks, self.seq_length // self.block_size, self.block_size, random_mapping)
 
         # ===========================
         # Attention probs and dropout
@@ -1174,7 +1176,8 @@ class BigBirdRingParallelAttention(MegatronModule):
         # matmul: [b * num_heads, local_blocks, block_size, hn]
         context_layer = mpu.BigBirdRingAV.apply(
             first_product, inner_product, last_product,
-            value_layer.contiguous()
+            value_layer.contiguous(),
+            random_mapping
         )
 
         # # change view [b, num_heads, sq, hn]
@@ -1199,7 +1202,7 @@ class BigBirdRingParallelAttention(MegatronModule):
 
         return output, bias
     
-    def get_attention_mask(self, attention_mask, local_blocks, total_blocks, block_size):
+    def get_attention_mask(self, attention_mask, local_blocks, total_blocks, block_size, random_mapping):
         # reshape attention mask to get diagonal
         band_shape = (attention_mask.size(0), attention_mask.size(1), local_blocks * block_size, block_size)
         attention_mask_reshape = attention_mask.view(
@@ -1218,8 +1221,28 @@ class BigBirdRingParallelAttention(MegatronModule):
         second_band = torch.diagonal(attention_mask_reshape[:, :, :, start_block:(end_block + 1)], dim1=2, dim2=3).reshape(*band_shape)
         third_band = torch.diagonal(torch.roll(attention_mask_reshape, -1, 3)[:, :, :, start_block:(end_block + 1)], dim1=2, dim2=3).reshape(*band_shape)
 
-        return torch.cat(
-            (first_band, second_band, third_band, attention_mask[:, :,:, :block_size], attention_mask[:, :, :, (-1 * block_size):]),
+        # Get random mask mapping
+        random_mask = torch.empty(
+            attention_mask.size(0),
+            attention_mask.size(1),
+            attention_mask.size(2),
+            2 * block_size,
+            dtype=attention_mask.dtype,
+            device=torch.cuda.current_device()
+        )
+        for i in range(local_blocks):
+            random_mask[:, :, (i * block_size):((i + 1) * block_size), :block_size] = \
+                attention_mask[:, :, (i * block_size):((i + 1) * block_size), (random_mapping[i][0] * block_size):((random_mapping[i][0] + 1) * block_size)]
+            random_mask[:, :, (i * block_size):((i + 1) * block_size), block_size:(2 * block_size)] = \
+                attention_mask[:, :, (i * block_size):((i + 1) * block_size), (random_mapping[i][1] * block_size):((random_mapping[i][1] + 1) * block_size)]
+
+        return torch.cat((
+            first_band, 
+            second_band, 
+            third_band, 
+            attention_mask[:, :,:, :block_size], 
+            attention_mask[:, :, :, (-1 * block_size):],
+            random_mask),
             dim=3
         )
 
@@ -1329,6 +1352,7 @@ class ParallelTransformerLayer(MegatronModule):
             args.hidden_size,
             eps=args.layernorm_epsilon)
 
+        self.bigbird = args.bigbird
 
         ####################################
         # NOTE: for RingParallelAttention  #
@@ -1392,18 +1416,29 @@ class ParallelTransformerLayer(MegatronModule):
 
     def forward(self, hidden_states, attention_mask,
                 encoder_output=None, enc_dec_attn_mask=None,
-                layer_past=None, get_key_value=False):
+                layer_past=None, get_key_value=False,
+                bigbird_random=None):
         # hidden_states: [b, s, h]
 
         # Layer norm at the beginning of the transformer layer.
         layernorm_output = self.input_layernorm(hidden_states)
 
         # Self attention.
-        attention_output, attention_bias = \
-            self.self_attention(layernorm_output,
-                                attention_mask,
-                                layer_past=layer_past,
-                                get_key_value=get_key_value)
+        if self.bigbird:
+            assert bigbird_random is not None, 'Random attention needed in Big Bird'
+            attention_output, attention_bias = \
+                self.self_attention(layernorm_output,
+                                    attention_mask,
+                                    layer_past=layer_past,
+                                    get_key_value=get_key_value,
+                                    random_mapping=bigbird_random)
+        else:
+            attention_output, attention_bias = \
+                self.self_attention(layernorm_output,
+                                    attention_mask,
+                                    layer_past=layer_past,
+                                    get_key_value=get_key_value)
+
         if get_key_value:
             attention_output, presents = attention_output
 
@@ -1550,7 +1585,8 @@ class ParallelTransformer(MegatronModule):
         return self.layers[layer_number]
 
     def _checkpointed_forward(self, hidden_states, attention_mask,
-                              encoder_output, enc_dec_attn_mask):
+                              encoder_output, enc_dec_attn_mask,
+                              bigbird_random=None):
         """Forward method with activation checkpointing."""
         def custom(start, end):
             def custom_forward(*inputs):
@@ -1560,7 +1596,7 @@ class ParallelTransformer(MegatronModule):
                 enc_dec_attn_mask = inputs[3]
                 for index in range(start, end):
                     layer = self._get_layer(index)
-                    x_ = layer(x_, attention_mask, encoder_output, enc_dec_attn_mask)
+                    x_ = layer(x_, attention_mask, encoder_output, enc_dec_attn_mask, bigbird_random)
                 return x_
             return custom_forward
 
@@ -1586,7 +1622,8 @@ class ParallelTransformer(MegatronModule):
         self.input_tensor = input_tensor
 
     def forward(self, hidden_states, attention_mask, layer_past=None,
-                get_key_value=False, encoder_output=None, enc_dec_attn_mask=None):
+                get_key_value=False, encoder_output=None, enc_dec_attn_mask=None,
+                bigbird_random=None):
 
         # Checks.
         if layer_past is not None:
@@ -1617,7 +1654,8 @@ class ParallelTransformer(MegatronModule):
             hidden_states = self._checkpointed_forward(hidden_states,
                                                        attention_mask,
                                                        encoder_output,
-                                                       enc_dec_attn_mask)
+                                                       enc_dec_attn_mask,
+                                                       bigbird_random)
         else:
             if get_key_value:
                 presents = []
@@ -1631,7 +1669,8 @@ class ParallelTransformer(MegatronModule):
                                       encoder_output=encoder_output,
                                       enc_dec_attn_mask=enc_dec_attn_mask,
                                       layer_past=past,
-                                      get_key_value=get_key_value)
+                                      get_key_value=get_key_value,
+                                      bigbird_random=bigbird_random)
                 if get_key_value:
                     hidden_states, present = hidden_states
                     presents.append(present)

@@ -47,7 +47,8 @@ def get_language_model(num_tokentypes, add_pooler,
                        encoder_attn_mask_type, init_method=None,
                        scaled_init_method=None, add_decoder=False,
                        decoder_attn_mask_type=AttnMaskType.causal,
-                       pre_process=True, post_process=True):
+                       pre_process=True, post_process=True,
+                       bigbird_random=None):
     """Build language model and return along with the key to save."""
     args = get_args()
 
@@ -341,7 +342,8 @@ class TransformerLanguageModel(MegatronModule):
                 dec_input_ids=None, dec_position_ids=None, dec_attn_mask=None,
                 enc_dec_attn_mask=None, tokentype_ids=None, layer_past=None,
                 get_key_value=False, pooling_sequence_index=0,
-                enc_hidden_states=None, output_enc_hidden=False):
+                enc_hidden_states=None, output_enc_hidden=False,
+                bigbird_random=None):
 
         # Embeddings.
         if self.pre_process:
@@ -356,7 +358,8 @@ class TransformerLanguageModel(MegatronModule):
             encoder_output = self.encoder(encoder_input,
                                           enc_attn_mask,
                                           layer_past=layer_past,
-                                          get_key_value=get_key_value)
+                                          get_key_value=get_key_value,
+                                          bigbird_random=bigbird_random)
         else:
             encoder_output = enc_hidden_states.to(encoder_input.dtype)
 
