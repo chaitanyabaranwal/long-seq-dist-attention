@@ -788,17 +788,17 @@ class LinformerRingParallelAttention(MegatronModule):
 
         # [sk, b, num_heads, hn] -> [b, num_heads, sk, hn]
         key_layer = key_layer.view(output_size[0], output_size[1],
-                                   key_layer.size(0), -1)
+                                   key_layer.size(0), -1).contiguous()
         assert attention_mask.size(0) == key_layer.size(0) and attention_mask.size(2) == key_layer.size(2), \
             'Attention mask dimensions do not match key matrix dimensions'
-        key_layer = key_layer.masked_fill(attention_mask, 0.0)
+        key_layer.masked_fill_(attention_mask, 0.0)
 
         # [sk, b, num_heads, hn] -> [b, num_heads, sk, hn]
         value_layer = value_layer.view(output_size[0], output_size[1],
-                                   value_layer.size(0), -1)
+                                   value_layer.size(0), -1).contiguous()
         assert attention_mask.size(0) == value_layer.size(0) and attention_mask.size(2) == value_layer.size(2), \
             'Attention mask dimensions do not match value matrix dimensions'
-        value_layer = value_layer.masked_fill(attention_mask, 0.0)
+        value_layer.masked_fill_(attention_mask, 0.0)
 
         # ===================================
         # Raw attention scores. [b, num_heads, s, s]
