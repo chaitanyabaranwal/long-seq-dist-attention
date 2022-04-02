@@ -110,6 +110,43 @@ def _communicate(tensor_send_next, tensor_send_prev, recv_prev, recv_next,
 # NOTE: for RingParallelAttention  #
 ####################################
 
+def ring_backward(tensor_send_prev):
+    args = get_args()
+    buffer_shape = tensor_send_next.size()
+
+    ops = []
+
+    current_rank = torch.distributed.get_rank()
+    # print(f'current rank: {current_rank}, next rank: {mpu.get_tensor_model_parallel_next_rank()}, prev rank: {mpu.get_tensor_model_parallel_prev_rank()}')
+
+    tensor_recv_next = torch.empty_like(tensor_send_prev,
+                                   requires_grad=True,
+                                   device=torch.cuda.current_device())
+
+    # send to prev rank
+    send_prev_op = torch.distributed.P2POp(
+        torch.distributed.isend, tensor_send_prev,
+        mpu.get_tensor_model_parallel_prev_rank())
+    ops.append(send_prev_op)
+
+    # receive from next rank
+    recv_next_op = torch.distributed.P2POp(
+        torch.distributed.irecv, tensor_recv_next,
+        mpu.get_tensor_model_parallel_next_rank())
+    ops.append(recv_next_op)
+
+    if current_rank % 2 == 0:
+        ops = ops[::-1]
+
+    reqs = torch.distributed.batch_isend_irecv(ops)
+    for req in reqs:
+        req.wait()
+
+    # To protect against race condition when using batch_isend_irecv().
+    torch.cuda.synchronize()
+
+    return tensor_recv_next
+
 def ring_forward(tensor_send_next):
     args = get_args()
     buffer_shape = tensor_send_next.size()

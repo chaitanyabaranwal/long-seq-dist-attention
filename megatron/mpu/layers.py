@@ -1027,7 +1027,14 @@ class BigBirdRingQK(torch.autograd.Function):
 
         # setup tensors for the gradients
         grad_block_q = torch.zeros_like(sub_block_q, dtype=grad_inner_product.dtype)
-        grad_block_k = torch.zeros_like(grad_block_q, dtype=grad_inner_product.dtype)
+        grad_block_k = torch.zeros(
+            args.micro_batch_size * args.num_attention_heads,
+            total_blocks,
+            args.block_size,
+            args.hidden_size // args.num_attention_heads,
+            dtype=grad_inner_product.dtype,
+            device=torch.cuda.current_device()
+        )
 
         # calculate local gradients of sub_block_q based on sliding window attention
         # TODO (chai): Consider breaking down into parts to save memory
@@ -1057,31 +1064,8 @@ class BigBirdRingQK(torch.autograd.Function):
                     sub_block_k[:, random_mapping[i][1] - cur_start_block + 1]
                 )
         
-        # calculate gradient of sub_block_k
-        grad_block_k += torch.matmul(
-            grad_inner_product[:, :, :, args.block_size:(2 * args.block_size)].transpose(2, 3), 
-            sub_block_q
-        )
-
-        # if more than one block, part of left and right attention blocks can be locally computed
-        if local_blocks > 1:
-            grad_block_k[:, :-1] += torch.matmul(
-                grad_inner_product[:, 1:, :, 0:args.block_size].transpose(2, 3), sub_block_q[:, 1:]
-            )
-            grad_block_k[:, 1:] += torch.matmul(
-                grad_inner_product[:, :-1, :, (2 * args.block_size):(3 * args.block_size)].transpose(2, 3), sub_block_q[:, :-1]
-            )
-        
         # compute the grad_block_q and grad_block_k blocks using ring communication
-        first_q_block_grad_k = torch.matmul(
-            grad_inner_product[:, 0, :, 0:args.block_size].transpose(1, 2), sub_block_q[:, 0]
-        )
-        last_q_block_grad_k = torch.matmul(
-            grad_inner_product[:, -1, :, (2 * args.block_size):(3 * args.block_size)].transpose(1, 2), sub_block_q[:, -1]
-        )
         for i in range(local_world_size - 1):
-            first_q_block_grad_k = ring_forward(first_q_block_grad_k)
-            last_q_block_grad_k = ring_forward(last_q_block_grad_k)
             sub_block_k = ring_forward(sub_block_k)
             start_block, end_block = _calc_incoming_device_block_range(i, local_rank, local_world_size)
 
@@ -1100,7 +1084,7 @@ class BigBirdRingQK(torch.autograd.Function):
             # calculate gradients of sub_block_q based on random attention
             for j in range(local_blocks):
                 if start_block <= random_mapping[j][0] <= end_block:
-                    grad_block_k[:, j] += torch.matmul(
+                    grad_block_q[:, j] += torch.matmul(
                         grad_inner_product[:, j, :, (5 * args.block_size):(6 * args.block_size)],
                         sub_block_k[:, random_mapping[j][0] - start_block + 1]
                     )
@@ -1110,69 +1094,67 @@ class BigBirdRingQK(torch.autograd.Function):
                         sub_block_k[:, random_mapping[j][1] - start_block + 1]
                     )
 
-            if start_block == (cur_end_block + 1) % total_blocks:
-                grad_block_k[:, -1] += first_q_block_grad_k
-            if end_block == (cur_start_block - 1) % total_blocks:
-                grad_block_k[:, 0] += last_q_block_grad_k
+        # At this point, grad_block_q has been computed
+        # calculate gradient of sub_block_k
 
-        # at this point, grad_block_k has the sliding window attention gradient computed
-        # compute gradients from global attention by first and last query blocks
-        grad_block_k_from_global = torch.zeros(
-            args.micro_batch_size * args.num_attention_heads,
-            total_blocks,
-            args.block_size,
-            args.hidden_size // args.num_attention_heads,
-            dtype=grad_block_k.dtype,
-            device=torch.cuda.current_device()
+        # second sliding window attention band
+        grad_block_k[:, cur_start_block:(cur_end_block + 1)] += torch.matmul(
+            grad_inner_product[:, :, :, args.block_size:(2 * args.block_size)].transpose(2, 3), 
+            sub_block_q
         )
+        # first sliding window attention band
         if grad_first_product is not None:
-            grad_block_k_from_global += torch.matmul(grad_first_product.transpose(2, 3), sub_block_q[:, 0:1])
+            grad_block_k[:, cur_start_block:cur_end_block] += torch.matmul(
+                grad_inner_product[:, 1:, :, :args.block_size].transpose(2, 3), sub_block_q[:, 1:]
+            )
+            grad_block_k[:, -1] += torch.matmul(
+                grad_inner_product[:, 0, :, :args.block_size].transpose(1, 2), sub_block_q[:, 0]
+            )
+        else:
+            grad_block_k[:, (cur_start_block - 1):cur_end_block] += torch.matmul(
+                grad_inner_product[:, :, :, :args.block_size].transpose(2, 3), sub_block_q
+            )
+        # third sliding window attention band
         if grad_last_product is not None:
-            grad_block_k_from_global += torch.matmul(grad_last_product.transpose(2, 3), sub_block_q[:, -1:])
-        torch.distributed.all_reduce(grad_block_k_from_global, group=get_tensor_model_parallel_group())
-        grad_block_k_from_global = grad_block_k_from_global[:, cur_start_block:(cur_end_block + 1)]
-        grad_block_k += grad_block_k_from_global
-
-        # compute gradients from global attention by first and last key blocks
-        grad_block_k_from_global = torch.matmul(
-            grad_inner_product[:, :, :, (3 * args.block_size):(4 * args.block_size)].transpose(2, 3),
-            sub_block_q
-        )
-        grad_block_k_from_global = torch.sum(grad_block_k_from_global, dim=1)
-        torch.distributed.reduce(grad_block_k_from_global, _calc_device_with_first_block(), group=get_tensor_model_parallel_group())
-        if cur_start_block == 0:
-            grad_block_k[:, 0] += grad_block_k_from_global
-        
-        grad_block_k_from_global = torch.matmul(
-            grad_inner_product[:, :, :, (4 * args.block_size):(5 * args.block_size)].transpose(2, 3),
-            sub_block_q
-        )
-        grad_block_k_from_global = torch.sum(grad_block_k_from_global, dim=1)
-        torch.distributed.reduce(grad_block_k_from_global, _calc_device_with_last_block(), group=get_tensor_model_parallel_group())
-        if cur_end_block == total_blocks - 1:
-            grad_block_k[:, -1] += grad_block_k_from_global
+            grad_block_k[:, (cur_start_block + 1):(cur_end_block + 1)] += torch.matmul(
+                grad_inner_product[:, :-1, :, (2 * args.block_size):(3 * args.block_size)].transpose(2, 3), sub_block_q[:, :-1]
+            )
+            grad_block_k[:, 0] += torch.matmul(
+                grad_inner_product[:, -1, :, (2 * args.block_size):(3 * args.block_size)].transpose(1, 2), sub_block_q[:, -1]
+            )
+        else:
+            grad_block_k[:, (cur_start_block + 1):(cur_end_block + 2)] += torch.matmul(
+                grad_inner_product[:, :, :, (2 * args.block_size):(3 * args.block_size)].transpose(2, 3), sub_block_q
+            )
         
         # compute gradients from random attention
-        grad_block_k_from_global = torch.zeros(
-            args.micro_batch_size * args.num_attention_heads,
-            total_blocks,
-            args.block_size,
-            args.hidden_size // args.num_attention_heads,
-            dtype=grad_block_k.dtype,
-            device=torch.cuda.current_device()
-        )
         for i in range(local_blocks):
-            grad_block_k_from_global[:, random_mapping[i][0]] += torch.matmul(
+            grad_block_k[:, random_mapping[i][0]] += torch.matmul(
                 grad_inner_product[:, i, :, (5 * args.block_size):(6 * args.block_size)].transpose(1, 2),
                 sub_block_q[:, i]
             )
-            grad_block_k_from_global[:, random_mapping[i][1]] += torch.matmul(
+            grad_block_k[:, random_mapping[i][1]] += torch.matmul(
                 grad_inner_product[:, i, :, (6 * args.block_size):(7 * args.block_size)].transpose(1, 2),
                 sub_block_q[:, i]
             )
-        torch.distributed.all_reduce(grad_block_k_from_global, group=get_tensor_model_parallel_group())
-        grad_block_k_from_global = grad_block_k_from_global[:, cur_start_block:(cur_end_block + 1)]
-        grad_block_k += grad_block_k_from_global
+        
+        # compute gradients from global attention which attends to every key block
+        if grad_first_product is not None:
+            grad_block_k += torch.matmul(grad_first_product.transpose(2, 3), sub_block_q[:, 0:1])
+        if grad_last_product is not None:
+            grad_block_k += torch.matmul(grad_last_product.transpose(2, 3), sub_block_q[:, -1:])
+
+        # compute gradients from global attention which is attends to first and last key blocks
+        grad_block_k[:, 0] += torch.sum(
+            torch.matmul(grad_inner_product[:, :, :, (3 * args.block_size):(4 * args.block_size)].transpose(2, 3), sub_block_q),
+            dim=1
+        )
+        grad_block_k[:, -1] += torch.sum(
+            torch.matmul(grad_inner_product[:, :, :, (4 * args.block_size):(5 * args.block_size)].transpose(2, 3), sub_block_q),
+            dim=1
+        )
+        torch.distributed.all_reduce(grad_block_k, group=get_tensor_model_parallel_group())
+        grad_block_k = grad_block_k[:, cur_start_block:(cur_end_block + 1)]
 
         return grad_block_q, grad_block_k, None
 
@@ -1346,7 +1328,14 @@ class BigBirdRingAV(torch.autograd.Function):
             device=torch.cuda.current_device()
         ) if last_product is not None else None
         grad_inner_product = torch.zeros_like(inner_product, dtype=grad_output.dtype, device=torch.cuda.current_device())
-        grad_block_v = torch.zeros_like(sub_block_v[:, 1:-1], dtype=inner_product.dtype, device=torch.cuda.current_device())
+        grad_block_v = torch.zeros(
+            args.micro_batch_size * args.num_attention_heads,
+            total_blocks,
+            args.block_size,
+            args.hidden_size // args.num_attention_heads,
+            dtype=inner_product.dtype,
+            device=torch.cuda.current_device()
+        )
 
         # calculate gradient for inner product
         # TODO (chai): Consider breaking down into parts to save memory
@@ -1375,21 +1364,10 @@ class BigBirdRingAV(torch.autograd.Function):
                     grad_output[:, i],
                     sub_block_v[:, random_mapping[i][1] - cur_start_block + 1].transpose(1, 2)
                 )
-
-        # calculate gradient of sub_block_v due to sliding window attention
-        grad_block_v += torch.matmul(inner_product[:, :, :, args.block_size:(2 * args.block_size)].transpose(2, 3), grad_output)
-        # if more than one block, part of left and right attention also used to compute output
-        if local_blocks > 1:
-            grad_block_v[:, :-1] += torch.matmul(inner_product[:, 1:, :, 0:args.block_size].transpose(2, 3), grad_output[:, 1:])
-            grad_block_v[:, 1:] += torch.matmul(inner_product[:, :-1, :, (2 * args.block_size):(3 * args.block_size)].transpose(2, 3), grad_output[:, :-1])
         
         # use ring communication to calculate remaining parts of gradient
-        first_a_block_grad_v = torch.matmul(inner_product[:, 0, :, 0:args.block_size].transpose(1, 2), grad_output[:, 0])
-        last_a_block_grad_v = torch.matmul(inner_product[:, -1, :, (2 * args.block_size):(3 * args.block_size)].transpose(1, 2), grad_output[:, -1])
         for i in range(local_world_size - 1):
             sub_block_v = ring_forward(sub_block_v)
-            first_a_block_grad_v = ring_forward(first_a_block_grad_v)
-            last_a_block_grad_v = ring_forward(last_a_block_grad_v)
             start_block, end_block = _calc_incoming_device_block_range(i, local_rank, local_world_size)
 
             if grad_first_product is not None:
@@ -1413,68 +1391,75 @@ class BigBirdRingAV(torch.autograd.Function):
                     grad_inner_product[:, j, :, (6 * args.block_size):(7 * args.block_size)] += torch.matmul(
                         grad_output[:, j],
                         sub_block_v[:, random_mapping[j][1] - start_block + 1].transpose(1, 2)
-                    )  
+                    )
 
-            if start_block == (cur_end_block + 1) % total_blocks:
-                grad_block_v[:, -1] += first_a_block_grad_v
-            if end_block == (cur_start_block - 1) % total_blocks:
-                grad_block_v[:, 0] += last_a_block_grad_v
-        
-        # at this point, grad_block_v has the gradients from sliding window attention computed
-        # computed gradients from global attention by first and last query blocks
-        grad_block_v_from_global = torch.zeros(
-            args.micro_batch_size * args.num_attention_heads,
-            total_blocks,
-            args.block_size,
-            args.hidden_size // args.num_attention_heads,
-            dtype=grad_block_v.dtype,
-            device=torch.cuda.current_device()
-        )
-        if grad_first_product is not None:
-            grad_block_v_from_global += torch.matmul(first_product.transpose(2, 3), grad_output[:, 0:1])
-        if grad_last_product is not None:
-            grad_block_v_from_global += torch.matmul(last_product.transpose(2, 3), grad_output[:, -1:])
-        torch.distributed.all_reduce(grad_block_v_from_global, group=get_tensor_model_parallel_group())
-        grad_block_v_from_global = grad_block_v_from_global[:, cur_start_block:(cur_end_block + 1)]
-        grad_block_v += grad_block_v_from_global
+        # at this point, gradient of attention products has been computed
+        # calculate gradient of sub_block_v
 
-        # compute gradients from global attention by first and last query blocks
-        grad_block_v_from_global = torch.matmul(
-            inner_product[:, :, :, (3 * args.block_size):(4 * args.block_size)].transpose(2, 3), grad_output
+        # second band of sliding window attention
+        grad_block_v[:, cur_start_block:(cur_end_block + 1)] += torch.matmul(
+            inner_product[:, :, :, args.block_size:(2 * args.block_size)].transpose(2, 3), 
+            grad_output
         )
-        grad_block_v_from_global = torch.sum(grad_block_v_from_global, dim=1)
-        torch.distributed.reduce(grad_block_v_from_global, _calc_device_with_first_block(), group=get_tensor_model_parallel_group())
-        if cur_start_block == 0:
-            grad_block_v[:, 0] += grad_block_v_from_global
-        grad_block_v_from_global = torch.matmul(
-            inner_product[:, :, :, (4 * args.block_size):(5 * args.block_size)].transpose(2, 3), grad_output
-        )
-        grad_block_v_from_global = torch.sum(grad_block_v_from_global, dim=1)
-        torch.distributed.reduce(grad_block_v_from_global, _calc_device_with_last_block(), group=get_tensor_model_parallel_group())
-        if cur_end_block == total_blocks - 1:
-            grad_block_v[:, -1] += grad_block_v_from_global
+        # first band of sliding window attention
+        if first_product is not None:
+            grad_block_v[:, cur_start_block:cur_end_block] += torch.matmul(
+                inner_product[:, 1:, :, :args.block_size].transpose(2, 3), 
+                grad_output[:, 1:]
+            )
+            grad_block_v[:, -1] += torch.matmul(
+                inner_product[:, 0, :, :args.block_size].transpose(1, 2), 
+                grad_output[:, 0]
+            )
+        else:
+            grad_block_v[:, (cur_start_block - 1):cur_end_block] += torch.matmul(
+                inner_product[:, :, :, :args.block_size].transpose(2, 3), 
+                grad_output
+            )
+        # last band of sliding window attention
+        if last_product is not None:
+            grad_block_v[:, (cur_start_block + 1):(cur_end_block + 1)] += torch.matmul(
+                inner_product[:, :-1, :, (2 * args.block_size):(3 * args.block_size)].transpose(2, 3), 
+                grad_output[:, :-1]
+            )
+            grad_block_v[:, 0] += torch.matmul(
+                inner_product[:, -1, :, (2 * args.block_size):(3 * args.block_size)].transpose(1, 2), 
+                grad_output[:, -1]
+            )
+        else:
+            grad_block_v[:, (cur_start_block + 1):(cur_end_block + 2)] += torch.matmul(
+                inner_product[:, :, :, (2 * args.block_size):(3 * args.block_size)].transpose(2, 3), 
+                grad_output
+            )
         
         # compute gradients from random attention
-        grad_block_v_from_global = torch.zeros(
-            args.micro_batch_size * args.num_attention_heads,
-            total_blocks,
-            args.block_size,
-            args.hidden_size // args.num_attention_heads,
-            dtype=grad_block_v.dtype,
-            device=torch.cuda.current_device()
-        )
         for i in range(local_blocks):
-            grad_block_v_from_global[:, random_mapping[i][0]] += torch.matmul(
+            grad_block_v[:, random_mapping[i][0]] += torch.matmul(
                 inner_product[:, i, :, (5 * args.block_size):(6 * args.block_size)].transpose(1, 2),
                 grad_output[:, i]
             )
-            grad_block_v_from_global[:, random_mapping[i][1]] += torch.matmul(
+            grad_block_v[:, random_mapping[i][1]] += torch.matmul(
                 inner_product[:, i, :, (6 * args.block_size):(7 * args.block_size)].transpose(1, 2),
                 grad_output[:, i]
             )
-        torch.distributed.all_reduce(grad_block_v_from_global, group=get_tensor_model_parallel_group())
-        grad_block_v_from_global = grad_block_v_from_global[:, cur_start_block:(cur_end_block + 1)]
-        grad_block_v += grad_block_v_from_global
+
+        # compute gradients from global attention attending to every key block
+        if grad_first_product is not None:
+            grad_block_v += torch.matmul(first_product.transpose(2, 3), grad_output[:, 0:1])
+        if grad_last_product is not None:
+            grad_block_v += torch.matmul(last_product.transpose(2, 3), grad_output[:, -1:])
+
+        # compute gradients from global attention attending to first and last key blocks
+        grad_block_v[:, 0] += torch.sum(
+            torch.matmul(inner_product[:, :, :, (3 * args.block_size):(4 * args.block_size)].transpose(2, 3), grad_output),
+            dim=1
+        )
+        grad_block_v[:, -1] += torch.sum(
+            torch.matmul(inner_product[:, :, :, (4 * args.block_size):(5 * args.block_size)].transpose(2, 3), grad_output),
+            dim=1
+        )
+        torch.distributed.all_reduce(grad_block_v, group=get_tensor_model_parallel_group())
+        grad_block_v = grad_block_v[:, cur_start_block:(cur_end_block + 1)]
 
         # remove top and bottom attention gradients if global attention already accounts for them
         inner_block_range = _calc_current_device_inner_product_blocks(local_rank, total_blocks)
