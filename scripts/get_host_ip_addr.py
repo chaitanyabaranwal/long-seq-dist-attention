@@ -9,7 +9,6 @@ ndb = NDB(log='on')
 for record in ndb.addresses.summary():
     record_dict = record._as_dict()
 
-    if record_dict['ifname'] == 'ib0' and ':' not in record_dict['address']:
+    if record_dict['ifname'] == 'ipogif0' and ':' not in record_dict['address']:
         print(record_dict['address'])
         break
-

@@ -6,17 +6,17 @@ module load nccl
 np=${1:-"1"}
 pipeline=${2:-"1"}
 tensor=${3:-"4"}
-seq=${4:-"128"}
-mic_bs=${5:-"8"}
-glb_bs=${6:-"8"}
-layer=${7:-"2"}
-hidden=${8:-"256"}
-heads=${9:-"8"}
-iters=${10:-"210"}
+seq=${4:-"512"}
+mic_bs=${5:-"64"}
+glb_bs=${6:-"64"}
+layer=${7:-"12"}
+hidden=${8:-"768"}
+heads=${9:-"12"}
+iters=${10:-"50000"}
 
-#python ./scripts/get_host_ip_addr.py > "./HOST"
-#ADDR=`cat ./HOST`
-export MASTER_ADDR=localhost
+python ./scripts/get_host_ip_addr.py > "./HOST"
+ADDR=`cat ./HOST`
+export MASTER_ADDR=$ADDR
 export MASTER_PORT=6000
 export PIPELINE_PARALLEL_SIZE=$pipeline
 export TENSOR_PARALLEL_SIZE=$tensor
@@ -29,4 +29,4 @@ export HIDDEN_SIZE=$hidden
 export NUM_HEADS=$heads
 export TRAIN_ITERS=$iters
 
-bash ./examples/pretrain_bert.sh
+srun bash ./examples/pretrain_bert_distributed.sh
