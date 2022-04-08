@@ -6,7 +6,7 @@ This repository extends from the original [Sequence Parallelism](https://arxiv.o
 
 # Setup
 
-Megatron-LM has been with python 3.8, pytorch 1.8, cuda 11.1, You can use a Docker or Singularity container to run the experiments. To pull the image, you can do as follows:
+Megatron-LM has been with python 3.8, pytorch 1.8, cuda 11.1. You can use a Docker or Singularity container to run the experiments. To pull the image, you can do as follows:
 
 ```bash
 singularity build pytorch18.simg docker://nvcr.io/nvidia/pytorch:20.12-py3
