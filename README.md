@@ -1,6 +1,6 @@
-This repository extends from the original [Sequence Parallelism](https://arxiv.org/abs/2105.13120) code.
+This repository extends from the original [Sequence Parallelism](https://arxiv.org/abs/2105.13120) code. A summarised brief of the model architecture can be found [here](https://chaitanyabaranwal.github.io/long-seq-dist-attention).
 
-# Sequence Parallelism
+# Sequence Parallelism with Linear Attention
 
 [Sequence Parallelism](https://arxiv.org/abs/2105.13120) is a method to train long sequences in Transformers by splitting the sequence and distributing it to different devices. This codebase implements Sequence Parallelism based on the [Megatron-LM](https://github.com/NVIDIA/Megatron-LM) proposed by NVIDIA. It also integrates linear complexity models of [Linformer](https://arxiv.org/abs/2006.04768) and [Big Bird](https://arxiv.org/abs/2007.14062) with Sequence Parallelism, making it possible to handle longer sequences than was possible either by just the linear complexity Transformers or just by full-attention Sequence Parallelism.
 
